@@ -1,0 +1,15 @@
+[Unit]
+Description=Prusa Connect Camera Snapshot Uploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m src.uploader_service
+WorkingDirectory={{INSTALL_DIR}}
+Restart=always
+RestartSec=10
+User={{USER}}
+
+[Install]
+WantedBy=multi-user.target
