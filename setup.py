@@ -422,14 +422,39 @@ def setup_nas(config: Config) -> bool:
     if not share_path:
         # Manual entry fallback
         print()
-        print("SMB Share Path - where to find it:")
-        print("  TrueNAS: Shares > Windows Shares (SMB) > Path column")
-        print("  Synology: Control Panel > Shared Folder > folder name")
-        print("  Example: 'storage/videos/printer' or just 'printer-footage'")
+        print("=" * 50)
+        print("SMB SHARE PATH (this is on your NAS, not your Pi)")
+        print("=" * 50)
+        print()
+        print("This is the share name/path AS IT APPEARS ON YOUR NAS.")
+        print("Do NOT enter a local path like /mnt/...")
+        print()
+        print("How to find it:")
+        print("  TrueNAS: Shares > Windows Shares (SMB) > look at 'Path' column")
+        print("           e.g., /mnt/storage/youtube-videos -> enter 'storage/youtube-videos'")
+        print("  Synology: Control Panel > Shared Folder > use the folder name")
+        print()
+        print("Examples:")
+        print("  storage                        (if share is called 'storage')")
+        print("  storage/youtube-videos         (share 'storage', subfolder 'youtube-videos')")
+        print("  media/printer-footage          (share 'media', subfolder 'printer-footage')")
         print()
         current_share = config.nas_share
-        share_path = prompt("SMB share path", current_share)
+        while True:
+            share_path = prompt("SMB share path", current_share)
+            # Warn if it looks like a local path
+            if share_path.startswith("/mnt") or share_path.startswith("/home"):
+                print()
+                print("  WARNING: This looks like a local path, not an SMB share path!")
+                print("  The SMB path should NOT start with /mnt or /home.")
+                print("  Enter the share name as it appears on your NAS.")
+                print()
+                if not confirm("  Use this path anyway?", default=False):
+                    continue
+            break
 
+    # Remove leading slash if present
+    share_path = share_path.lstrip("/")
     config.set("nas", "share", share_path)
 
     # Mount point
