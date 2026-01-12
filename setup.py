@@ -28,8 +28,8 @@ from src.printer import PrinterStatus
 from src.nas import NASMount
 
 
-def list_smb_shares(nas_ip: str, username: str, password: str) -> List[str]:
-    """List available SMB shares on the NAS."""
+def list_smb_shares(nas_ip: str, username: str, password: str) -> tuple[List[str], str]:
+    """List available SMB shares on the NAS. Returns (shares, error_msg)."""
     try:
         result = subprocess.run(
             ["smbclient", "-L", nas_ip, "-U", f"{username}%{password}", "-g"],
@@ -37,6 +37,10 @@ def list_smb_shares(nas_ip: str, username: str, password: str) -> List[str]:
             text=True,
             timeout=30,
         )
+        if result.returncode != 0:
+            error = result.stderr.strip() if result.stderr else "Unknown error"
+            return [], f"smbclient failed: {error}"
+
         shares = []
         for line in result.stdout.split("\n"):
             if line.startswith("Disk|"):
@@ -46,9 +50,13 @@ def list_smb_shares(nas_ip: str, username: str, password: str) -> List[str]:
                     # Skip system shares
                     if not share_name.endswith("$"):
                         shares.append(share_name)
-        return shares
-    except Exception:
-        return []
+        if not shares:
+            return [], "No shares found in smbclient output"
+        return shares, ""
+    except subprocess.TimeoutExpired:
+        return [], "Connection timed out"
+    except Exception as e:
+        return [], str(e)
 
 
 def list_smb_directory(nas_ip: str, share: str, path: str, username: str, password: str) -> List[str]:
@@ -86,16 +94,27 @@ def list_smb_directory(nas_ip: str, share: str, path: str, username: str, passwo
 def browse_smb_interactive(nas_ip: str, username: str, password: str) -> Optional[str]:
     """Interactively browse SMB shares and return selected path."""
     if not HAS_MENU:
-        print("  Arrow-key navigation not available. Install: pip3 install simple-term-menu")
+        print("  Arrow-key navigation not available.")
+        print("  Install with: pip3 install simple-term-menu")
+        return None
+
+    if not shutil.which("smbclient"):
+        print("  smbclient not installed. Cannot browse NAS.")
         return None
 
     # First, list shares
-    print("  Fetching available shares...")
-    shares = list_smb_shares(nas_ip, username, password)
+    print("  Connecting to NAS and fetching shares...")
+    shares, error = list_smb_shares(nas_ip, username, password)
+
+    if error:
+        print(f"  Failed to list shares: {error}")
+        return None
 
     if not shares:
-        print("  No shares found or could not connect.")
+        print("  No shares found on NAS.")
         return None
+
+    print(f"  Found {len(shares)} share(s): {', '.join(shares)}")
 
     # Select share
     print()
@@ -409,35 +428,40 @@ def setup_nas(config: Config) -> bool:
 
     password = prompt_password("SMB Password")
 
-    # Share path - try interactive browse first
+    # Share path - try interactive browse first (automatically)
     print()
+    print("=" * 50)
+    print("  NAS FOLDER SELECTION")
+    print("=" * 50)
+    print()
+
     share_path = None
 
-    if HAS_MENU and shutil.which("smbclient"):
-        if confirm("Browse NAS folders interactively?", default=True):
-            share_path = browse_smb_interactive(nas_ip, username, password)
-            if share_path:
-                print(f"  Selected: {share_path}")
+    # Always try interactive browse first
+    print("Attempting to browse NAS folders...")
+    share_path = browse_smb_interactive(nas_ip, username, password)
 
-    if not share_path:
-        # Manual entry fallback
+    if share_path:
         print()
-        print("=" * 50)
-        print("SMB SHARE PATH (this is on your NAS, not your Pi)")
-        print("=" * 50)
+        print(f"  Selected path: {share_path}")
+    else:
+        # Interactive browse failed, fall back to manual entry
         print()
-        print("This is the share name/path AS IT APPEARS ON YOUR NAS.")
-        print("Do NOT enter a local path like /mnt/...")
+        print("Falling back to manual entry...")
         print()
-        print("How to find it:")
-        print("  TrueNAS: Shares > Windows Shares (SMB) > look at 'Path' column")
-        print("           e.g., /mnt/storage/youtube-videos -> enter 'storage/youtube-videos'")
-        print("  Synology: Control Panel > Shared Folder > use the folder name")
+        print("-" * 50)
+        print("MANUAL SMB PATH ENTRY")
+        print("-" * 50)
         print()
-        print("Examples:")
-        print("  storage                        (if share is called 'storage')")
-        print("  storage/youtube-videos         (share 'storage', subfolder 'youtube-videos')")
-        print("  media/printer-footage          (share 'media', subfolder 'printer-footage')")
+        print("The path you enter is the SHARE NAME on your NAS, NOT a local path.")
+        print()
+        print("WRONG: /mnt/storage/youtube-videos  (this is a local TrueNAS path)")
+        print("RIGHT: storage/youtube-videos       (share name + subfolder)")
+        print()
+        print("In TrueNAS:")
+        print("  - Go to Shares > Windows Shares (SMB)")
+        print("  - Look at the 'Name' column - that's your share name")
+        print("  - Then add any subfolder path after it")
         print()
         current_share = config.nas_share
         while True:
@@ -445,11 +469,12 @@ def setup_nas(config: Config) -> bool:
             # Warn if it looks like a local path
             if share_path.startswith("/mnt") or share_path.startswith("/home"):
                 print()
-                print("  WARNING: This looks like a local path, not an SMB share path!")
-                print("  The SMB path should NOT start with /mnt or /home.")
-                print("  Enter the share name as it appears on your NAS.")
+                print("  *** ERROR: This looks like a local path! ***")
+                print("  You entered something starting with /mnt or /home")
+                print("  The SMB path should be: share_name/subfolder")
+                print("  NOT: /mnt/pool/share_name/subfolder")
                 print()
-                if not confirm("  Use this path anyway?", default=False):
+                if not confirm("  Are you SURE this is correct?", default=False):
                     continue
             break
 
