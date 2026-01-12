@@ -189,67 +189,115 @@ def confirm(text: str, default: bool = True) -> bool:
     return result in ("y", "yes")
 
 
+def check_camera_config() -> bool:
+    """Check if camera_auto_detect=1 is in config.txt."""
+    for config_path in [Path("/boot/firmware/config.txt"), Path("/boot/config.txt")]:
+        if config_path.exists():
+            try:
+                content = config_path.read_text()
+                for line in content.split("\n"):
+                    line = line.strip()
+                    if line.startswith("#"):
+                        continue
+                    if "camera_auto_detect" in line and "=1" in line:
+                        return True
+            except Exception:
+                pass
+    return False
+
+
 def check_prerequisites() -> bool:
     """Check and display prerequisites."""
     print_header("Prerequisites Check")
 
+    # Define checks: (name, check_function, apt_package, install_instruction)
     checks = [
-        ("Camera config", Path("/boot/firmware/config.txt").exists() or Path("/boot/config.txt").exists()),
-        ("rpicam-still", shutil.which("rpicam-still") is not None),
-        ("ffmpeg", shutil.which("ffmpeg") is not None),
-        ("TailScale", shutil.which("tailscale") is not None),
-        ("cifs-utils", Path("/sbin/mount.cifs").exists()),
-        ("smbclient", shutil.which("smbclient") is not None),
+        ("camera_auto_detect=1", check_camera_config(), None, None),
+        ("rpicam-still", shutil.which("rpicam-still") is not None, "rpicam-apps", None),
+        ("ffmpeg", shutil.which("ffmpeg") is not None, "ffmpeg", None),
+        ("TailScale", shutil.which("tailscale") is not None, None, "curl -fsSL https://tailscale.com/install.sh | sh"),
+        ("cifs-utils", Path("/sbin/mount.cifs").exists(), "cifs-utils", None),
+        ("smbclient", shutil.which("smbclient") is not None, "smbclient", None),
     ]
 
-    all_ok = True
-    for name, ok in checks:
+    missing = []
+    for name, ok, apt_pkg, custom_install in checks:
         status = "[OK]" if ok else "[MISSING]"
         print(f"  {status} {name}")
         if not ok:
-            all_ok = False
+            missing.append((name, apt_pkg, custom_install))
 
     print()
 
-    if not all_ok:
-        print("Some prerequisites are missing. Please install them first:")
-        print()
-        print("  # For camera support (usually pre-installed on Pi OS):")
-        print("  sudo apt install rpicam-apps")
-        print()
-        print("  # For video creation:")
-        print("  sudo apt install ffmpeg")
-        print()
-        print("  # For TailScale (if not installed):")
-        print("  curl -fsSL https://tailscale.com/install.sh | sh")
-        print()
-        print("  # For NAS mounting and browsing:")
-        print("  sudo apt install cifs-utils smbclient")
-        print()
-        print("Also ensure your /boot/firmware/config.txt has:")
-        print("  camera_auto_detect=1")
-        print()
+    if not missing:
+        print("All prerequisites satisfied!")
+    else:
+        # Collect apt packages that can be auto-installed
+        apt_packages = [pkg for name, pkg, _ in missing if pkg]
+        custom_installs = [(name, cmd) for name, _, cmd in missing if cmd]
+        config_missing = any(name == "camera_auto_detect=1" for name, _, _ in missing)
 
-        if not confirm("Continue anyway?", default=False):
-            return False
+        # Offer to auto-install apt packages
+        if apt_packages:
+            print(f"Missing packages: {', '.join(apt_packages)}")
+            if confirm("Install missing packages automatically?", default=True):
+                print(f"  Running: sudo apt install -y {' '.join(apt_packages)}")
+                result = subprocess.run(
+                    ["sudo", "apt", "install", "-y"] + apt_packages,
+                    capture_output=False,
+                )
+                if result.returncode != 0:
+                    print("  Installation failed. Please install manually.")
+                    if not confirm("Continue anyway?", default=False):
+                        return False
+                else:
+                    print("  Packages installed successfully!")
+            else:
+                print()
+                print("To install manually:")
+                print(f"  sudo apt install -y {' '.join(apt_packages)}")
+                if not confirm("Continue anyway?", default=False):
+                    return False
 
-    # Check TailScale status
-    print("Checking TailScale connection...")
-    try:
-        result = subprocess.run(
-            ["tailscale", "status"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            print("  TailScale is not connected. Please run: sudo tailscale up")
+        # Show custom install instructions (TailScale)
+        for name, cmd in custom_installs:
+            print()
+            print(f"{name} requires manual installation:")
+            print(f"  {cmd}")
             if not confirm("Continue anyway?", default=False):
                 return False
-        else:
-            print("  TailScale is connected.")
-    except Exception:
-        print("  Could not check TailScale status.")
+
+        # Camera config check
+        if config_missing:
+            print()
+            print("Camera not enabled in config.txt!")
+            print("Add this line to /boot/firmware/config.txt:")
+            print("  camera_auto_detect=1")
+            print()
+            print("Then reboot your Pi.")
+            if not confirm("Continue anyway?", default=False):
+                return False
+
+    # Check TailScale status (only if installed)
+    if shutil.which("tailscale"):
+        print()
+        print("Checking TailScale connection...")
+        try:
+            result = subprocess.run(
+                ["tailscale", "status"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                print("  TailScale is not connected.")
+                print("  Run: sudo tailscale up")
+                if not confirm("Continue anyway?", default=False):
+                    return False
+            else:
+                print("  TailScale is connected.")
+        except Exception:
+            print("  Could not check TailScale status.")
 
     print()
     return True
