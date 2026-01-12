@@ -229,22 +229,23 @@ def check_prerequisites() -> bool:
     """Check and display prerequisites."""
     print_header("Prerequisites Check")
 
-    # Define checks: (name, check_function, apt_package, install_instruction)
+    # Define checks: (name, check_function, apt_package, pip_package, install_instruction)
     checks = [
-        ("camera_auto_detect=1", check_camera_config(), None, None),
-        ("rpicam-still", shutil.which("rpicam-still") is not None, "rpicam-apps", None),
-        ("ffmpeg", shutil.which("ffmpeg") is not None, "ffmpeg", None),
-        ("TailScale", shutil.which("tailscale") is not None, None, "curl -fsSL https://tailscale.com/install.sh | sh"),
-        ("cifs-utils", Path("/sbin/mount.cifs").exists(), "cifs-utils", None),
-        ("smbclient", shutil.which("smbclient") is not None, "smbclient", None),
+        ("camera_auto_detect=1", check_camera_config(), None, None, None),
+        ("rpicam-still", shutil.which("rpicam-still") is not None, "rpicam-apps", None, None),
+        ("ffmpeg", shutil.which("ffmpeg") is not None, "ffmpeg", None, None),
+        ("TailScale", shutil.which("tailscale") is not None, None, None, "curl -fsSL https://tailscale.com/install.sh | sh"),
+        ("cifs-utils", Path("/sbin/mount.cifs").exists(), "cifs-utils", None, None),
+        ("smbclient", shutil.which("smbclient") is not None, "smbclient", None, None),
+        ("simple-term-menu", HAS_MENU, None, "simple-term-menu", None),
     ]
 
     missing = []
-    for name, ok, apt_pkg, custom_install in checks:
+    for name, ok, apt_pkg, pip_pkg, custom_install in checks:
         status = "[OK]" if ok else "[MISSING]"
         print(f"  {status} {name}")
         if not ok:
-            missing.append((name, apt_pkg, custom_install))
+            missing.append((name, apt_pkg, pip_pkg, custom_install))
 
     print()
 
@@ -252,14 +253,15 @@ def check_prerequisites() -> bool:
         print("All prerequisites satisfied!")
     else:
         # Collect apt packages that can be auto-installed
-        apt_packages = [pkg for name, pkg, _ in missing if pkg]
-        custom_installs = [(name, cmd) for name, _, cmd in missing if cmd]
-        config_missing = any(name == "camera_auto_detect=1" for name, _, _ in missing)
+        apt_packages = [pkg for name, pkg, _, _ in missing if pkg]
+        pip_packages = [pkg for name, _, pkg, _ in missing if pkg]
+        custom_installs = [(name, cmd) for name, _, _, cmd in missing if cmd]
+        config_missing = any(name == "camera_auto_detect=1" for name, _, _, _ in missing)
 
         # Offer to auto-install apt packages
         if apt_packages:
-            print(f"Missing packages: {', '.join(apt_packages)}")
-            if confirm("Install missing packages automatically?", default=True):
+            print(f"Missing apt packages: {', '.join(apt_packages)}")
+            if confirm("Install missing apt packages automatically?", default=True):
                 print(f"  Running: sudo apt install -y {' '.join(apt_packages)}")
                 result = subprocess.run(
                     ["sudo", "apt", "install", "-y"] + apt_packages,
@@ -270,11 +272,37 @@ def check_prerequisites() -> bool:
                     if not confirm("Continue anyway?", default=False):
                         return False
                 else:
-                    print("  Packages installed successfully!")
+                    print("  Apt packages installed successfully!")
             else:
                 print()
                 print("To install manually:")
                 print(f"  sudo apt install -y {' '.join(apt_packages)}")
+                if not confirm("Continue anyway?", default=False):
+                    return False
+
+        # Offer to auto-install pip packages
+        if pip_packages:
+            print()
+            print(f"Missing Python packages: {', '.join(pip_packages)}")
+            if confirm("Install missing Python packages automatically?", default=True):
+                for pkg in pip_packages:
+                    print(f"  Installing {pkg}...")
+                    result = subprocess.run(
+                        ["pip3", "install", "--break-system-packages", pkg],
+                        capture_output=True,
+                    )
+                    if result.returncode != 0:
+                        print(f"  Failed to install {pkg}. Install manually:")
+                        print(f"    pip3 install --break-system-packages {pkg}")
+                        if not confirm("Continue anyway?", default=False):
+                            return False
+                    else:
+                        print(f"  {pkg} installed successfully!")
+            else:
+                print()
+                print("To install manually:")
+                for pkg in pip_packages:
+                    print(f"  pip3 install --break-system-packages {pkg}")
                 if not confirm("Continue anyway?", default=False):
                     return False
 
