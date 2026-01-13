@@ -23,7 +23,7 @@ class PrinterStatus:
         Initialize printer status monitor.
 
         Args:
-            printer_ip: Printer's local IP address (e.g., 192.168.1.81)
+            printer_ip: Printer's local IP address
             api_key: PrusaLink API key (from printer settings)
         """
         self.printer_ip = printer_ip

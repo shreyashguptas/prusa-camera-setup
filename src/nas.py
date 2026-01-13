@@ -214,36 +214,3 @@ class NASMount:
         except Exception as e:
             return False, str(e)
 
-    def get_systemd_mount_unit(self) -> str:
-        """Generate systemd mount unit content."""
-        # Convert mount point to systemd unit name
-        unit_name = str(self.mount_point).replace("/", "-").lstrip("-")
-
-        return f"""[Unit]
-Description=NAS Mount for Prusa Timelapse Storage
-After=network-online.target tailscaled.service
-Wants=network-online.target
-
-[Mount]
-What={self.smb_path}
-Where={self.mount_point}
-Type=cifs
-Options=credentials={self.CREDENTIALS_PATH},uid=1000,gid=1000,file_mode=0664,dir_mode=0775,_netdev
-
-[Install]
-WantedBy=multi-user.target
-"""
-
-    def get_systemd_automount_unit(self) -> str:
-        """Generate systemd automount unit content."""
-        return f"""[Unit]
-Description=Automount for NAS Prusa Timelapse Storage
-After=network-online.target
-
-[Automount]
-Where={self.mount_point}
-TimeoutIdleSec=0
-
-[Install]
-WantedBy=multi-user.target
-"""

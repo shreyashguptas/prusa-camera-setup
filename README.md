@@ -83,10 +83,15 @@ Reboot after making changes.
 1. On your printer page, click "Add Camera"
 2. Generate a new camera token (20 characters)
 
-### API Key
-1. Go to Account > API Access
-2. Generate a new PrusaConnect API Key
-3. This is used for auto-detecting print start/stop
+### API Key (PrusaLink)
+1. On your printer, go to Settings > Network > PrusaLink
+2. Note the API key shown there (or find it in Prusa Connect under your printer's Settings tab)
+3. This is used for auto-detecting print start/stop via the local PrusaLink API
+
+### Printer IP Address
+1. On your printer, go to Settings > Network > PrusaLink
+2. Note the IP address shown
+3. Or check your router for the printer's IP address
 
 ## Configuration
 
@@ -97,7 +102,8 @@ Example configuration:
 [prusa]
 printer_uuid = abc123-def456-...
 camera_token = XXXXXXXXXXXXXXXXXXXX
-api_key = your_long_api_key_here
+api_key = your_prusalink_api_key
+printer_ip = your_printer_ip_here
 
 [nas]
 ip = your_nas_ip_here
