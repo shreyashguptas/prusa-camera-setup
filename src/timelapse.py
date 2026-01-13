@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -83,6 +84,36 @@ class TimelapseManager:
         """Check if currently recording."""
         return self.CONTROL_FILE.exists()
 
+    def _copy_with_timeout(self, src: Path, dst: Path, timeout: int = 30) -> bool:
+        """
+        Copy file with timeout to prevent hanging on slow/dead NAS.
+
+        Args:
+            src: Source file path
+            dst: Destination file path
+            timeout: Timeout in seconds (default 30)
+
+        Returns:
+            True if copy succeeded within timeout.
+        """
+        def timeout_handler(signum, frame):
+            raise TimeoutError("File copy timed out")
+
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
+        try:
+            shutil.copy2(src, dst)
+            return True
+        except TimeoutError:
+            print(f"\nWarning: NAS transfer timed out for {dst.name}")
+            return False
+        except Exception as e:
+            print(f"\nWarning: NAS transfer failed: {e}")
+            return False
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
     def capture_frame(self, session_name: str, frame_number: int) -> bool:
         """
         Capture a frame for the timelapse.
@@ -103,13 +134,9 @@ class TimelapseManager:
         if not snapshot:
             return False
 
-        # Copy to NAS
+        # Copy to NAS with timeout protection
         frame_path = frames_dir / f"frame_{frame_number:06d}.jpg"
-        try:
-            shutil.copy2(snapshot, frame_path)
-            return True
-        except Exception:
-            return False
+        return self._copy_with_timeout(snapshot, frame_path, timeout=30)
 
     def create_video(self, session_name: str) -> Optional[Path]:
         """
@@ -135,8 +162,8 @@ class TimelapseManager:
         cmd = [
             "ffmpeg", "-y",
             "-framerate", str(self.config.video_fps),
-            "-pattern_type", "glob",
-            "-i", str(frames_dir / "frame_*.jpg"),
+            "-start_number", "0",
+            "-i", str(frames_dir / "frame_%06d.jpg"),
             "-c:v", "libx264",
             "-preset", "medium",
             "-crf", str(self.config.video_quality),
@@ -155,11 +182,64 @@ class TimelapseManager:
 
             if result.returncode == 0 and output_file.exists():
                 return output_file
+            # Log FFMPEG error for debugging
+            if result.stderr:
+                print(f"FFMPEG error: {result.stderr}")
             return None
 
         except subprocess.TimeoutExpired:
+            print("FFMPEG error: Timed out after 10 minutes")
             return None
-        except Exception:
+        except Exception as e:
+            print(f"FFMPEG error: {e}")
+            return None
+
+    def create_video_async(self, session_name: str) -> Optional[subprocess.Popen]:
+        """
+        Start video creation in background (non-blocking).
+
+        Args:
+            session_name: Session name
+
+        Returns:
+            Popen process handle or None on setup failure.
+        """
+        session_dir = self.storage_path / session_name
+        frames_dir = session_dir / "frames"
+        output_file = session_dir / f"{session_name}.mp4"
+
+        if not frames_dir.exists():
+            return None
+
+        frame_count = len(list(frames_dir.glob("frame_*.jpg")))
+        if frame_count == 0:
+            return None
+
+        # Use nice to lower FFMPEG priority so it doesn't starve frame capture
+        cmd = [
+            "nice", "-n", "10",
+            "ffmpeg", "-y",
+            "-framerate", str(self.config.video_fps),
+            "-start_number", "0",
+            "-i", str(frames_dir / "frame_%06d.jpg"),
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", str(self.config.video_quality),
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_file),
+        ]
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            return process
+        except Exception as e:
+            print(f"Failed to start video encoding: {e}")
             return None
 
     def run_monitor(self, check_interval: int = 30):
@@ -184,30 +264,79 @@ class TimelapseManager:
         frame_count = 0
         last_capture = 0
 
+        # Resilience: track background video encoding processes
+        pending_videos: list[tuple[str, subprocess.Popen]] = []
+
+        # Resilience: debounce printer status to avoid false stops
+        not_printing_count = 0
+        STOP_THRESHOLD = 3  # Require 3 consecutive "not printing" to stop
+
+        # Resilience: track capture metrics
+        capture_success = 0
+        capture_failed = 0
+
         while True:
             try:
+                # Check for completed background video encodings (non-blocking)
+                for session, proc in pending_videos[:]:
+                    if proc.poll() is not None:
+                        if proc.returncode == 0:
+                            output_file = self.storage_path / session / f"{session}.mp4"
+                            print(f"\nVideo created: {output_file}")
+                        else:
+                            stderr = proc.stderr.read().decode() if proc.stderr else ""
+                            print(f"\nVideo encoding failed for {session}: {stderr[:200]}")
+                        pending_videos.remove((session, proc))
+
                 # Check for manual override
                 manual_session = self._get_active_session()
 
                 # Check printer status
                 status = self.printer.get_status()
-                is_printing = status.is_printing if status else False
-                job_id = status.job_id if status else None
+
+                # Resilience: handle API failures gracefully
+                if status is None:
+                    print("Warning: Printer API unreachable", end="\r", flush=True)
+                    time.sleep(check_interval)
+                    continue
+
+                is_printing = status.is_printing
+                job_id = status.job_id
 
                 # Determine if we should be recording
                 should_record = is_printing or manual_session is not None
+
+                # Resilience: debounce stop decision
+                if not should_record and current_session and not manual_session:
+                    not_printing_count += 1
+                    if not_printing_count < STOP_THRESHOLD:
+                        # Don't stop yet, keep capturing
+                        now = time.time()
+                        if now - last_capture >= self.config.capture_interval:
+                            if self.capture_frame(current_session, frame_count):
+                                frame_count += 1
+                                capture_success += 1
+                                print(f"Frame {frame_count} captured (debounce {not_printing_count}/{STOP_THRESHOLD})", end="\r", flush=True)
+                            else:
+                                capture_failed += 1
+                            last_capture = now
+                        time.sleep(min(check_interval, self.config.capture_interval))
+                        continue
+                else:
+                    not_printing_count = 0
 
                 # Detect job ID change (new print started while already recording)
                 if current_session and current_job_id and job_id and job_id != current_job_id:
                     print(f"\nJob changed ({current_job_id} -> {job_id}), finalizing previous recording...")
                     print(f"Recording stopped: {current_session}")
-                    print("Creating video...")
-                    video_path = self.create_video(current_session)
-                    if video_path:
-                        print(f"Video created: {video_path}")
+                    # Start video encoding in background (non-blocking)
+                    proc = self.create_video_async(current_session)
+                    if proc:
+                        print(f"Video encoding started in background: {current_session}")
+                        pending_videos.append((current_session, proc))
                     else:
-                        print("Video creation failed")
-                    # Reset for new recording
+                        print("Video encoding failed to start (no frames?)")
+                    # Reset for new recording immediately - don't wait for encoding
                     current_session = None
                     current_job_id = None
                     frame_count = 0
@@ -239,18 +368,25 @@ class TimelapseManager:
 
                 elif not should_record and current_session is not None:
                     # Stop recording
-                    print(f"Recording stopped: {current_session}")
-                    print("Creating video...")
-
-                    video_path = self.create_video(current_session)
-                    if video_path:
-                        print(f"Video created: {video_path}")
+                    print(f"\nRecording stopped: {current_session}")
+                    # Log capture metrics for this session
+                    total = capture_success + capture_failed
+                    if total > 0:
+                        rate = capture_success / total * 100
+                        print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
+                    # Start video encoding in background (non-blocking)
+                    proc = self.create_video_async(current_session)
+                    if proc:
+                        print(f"Video encoding started in background: {current_session}")
+                        pending_videos.append((current_session, proc))
                     else:
-                        print("Video creation failed")
+                        print("Video encoding failed to start (no frames?)")
 
                     current_session = None
                     current_job_id = None
                     frame_count = 0
+                    capture_success = 0
+                    capture_failed = 0
 
                 # Capture frames if recording
                 if current_session:
@@ -258,8 +394,17 @@ class TimelapseManager:
                     if now - last_capture >= self.config.capture_interval:
                         if self.capture_frame(current_session, frame_count):
                             frame_count += 1
+                            capture_success += 1
                             print(f"Frame {frame_count} captured", end="\r", flush=True)
+                        else:
+                            capture_failed += 1
                         last_capture = now
+
+                        # Resilience: log capture rate every 100 attempts
+                        total = capture_success + capture_failed
+                        if total > 0 and total % 100 == 0:
+                            rate = capture_success / total * 100
+                            print(f"\nCapture rate: {rate:.1f}% ({capture_success}/{total})")
 
                 time.sleep(min(check_interval, self.config.capture_interval))
 
@@ -268,9 +413,19 @@ class TimelapseManager:
                 if current_session:
                     print(f"Creating video for {current_session}...")
                     self.stop_recording()
+                    # Use blocking create_video for graceful shutdown
                     video_path = self.create_video(current_session)
                     if video_path:
                         print(f"Video created: {video_path}")
+                # Wait for any pending background encodings
+                if pending_videos:
+                    print(f"Waiting for {len(pending_videos)} background encoding(s) to finish...")
+                    for session, proc in pending_videos:
+                        proc.wait()
+                        if proc.returncode == 0:
+                            print(f"Video created: {session}")
+                        else:
+                            print(f"Video failed: {session}")
                 break
             except Exception as e:
                 print(f"\nError: {e}")
