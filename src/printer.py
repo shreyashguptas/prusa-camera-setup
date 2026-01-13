@@ -11,6 +11,7 @@ class PrinterState:
 
     is_printing: bool
     state_text: str
+    job_id: Optional[int] = None
     job_name: Optional[str] = None
     progress: Optional[float] = None
 
@@ -70,7 +71,8 @@ class PrinterStatus:
             is_printing = job_state == "PRINTING" or printer_state == "PRINTING"
             state_text = job_state if job_state else printer_state
 
-            # Get job name and progress if available
+            # Get job ID, name, and progress if available
+            job_id = job.get("id")
             job_file = job.get("file", {})
             job_name = job_file.get("display_name") or job_file.get("name") if job_file else None
             progress = job.get("progress", 0)
@@ -78,6 +80,7 @@ class PrinterStatus:
             return PrinterState(
                 is_printing=is_printing,
                 state_text=state_text,
+                job_id=job_id,
                 job_name=job_name,
                 progress=progress,
             )

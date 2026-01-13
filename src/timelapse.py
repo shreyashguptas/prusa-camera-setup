@@ -174,8 +174,8 @@ class TimelapseManager:
         print(f"  Stop:  rm {self.CONTROL_FILE}")
         print()
 
-        was_printing = False
         current_session = None
+        current_job_id = None
         frame_count = 0
         last_capture = 0
 
@@ -187,15 +187,32 @@ class TimelapseManager:
                 # Check printer status
                 status = self.printer.get_status()
                 is_printing = status.is_printing if status else False
+                job_id = status.job_id if status else None
 
                 # Determine if we should be recording
                 should_record = is_printing or manual_session is not None
+
+                # Detect job ID change (new print started while already recording)
+                if current_session and current_job_id and job_id and job_id != current_job_id:
+                    print(f"\nJob changed ({current_job_id} -> {job_id}), finalizing previous recording...")
+                    print(f"Recording stopped: {current_session}")
+                    print("Creating video...")
+                    video_path = self.create_video(current_session)
+                    if video_path:
+                        print(f"Video created: {video_path}")
+                    else:
+                        print("Video creation failed")
+                    # Reset for new recording
+                    current_session = None
+                    current_job_id = None
+                    frame_count = 0
 
                 # Handle state transitions
                 if should_record and current_session is None:
                     # Start recording
                     if manual_session:
                         current_session = manual_session
+                        current_job_id = None  # Manual recordings don't track job ID
                         print(f"Recording started (manual): {current_session}")
                     else:
                         job_name = status.job_name if status else None
@@ -205,8 +222,9 @@ class TimelapseManager:
                             current_session = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
                         else:
                             current_session = self._get_session_name()
+                        current_job_id = job_id  # Track job ID for this recording
                         self.start_recording(current_session)
-                        print(f"Recording started (auto): {current_session}")
+                        print(f"Recording started (auto, job {job_id}): {current_session}")
 
                     frame_count = 0
                     last_capture = 0
@@ -223,6 +241,7 @@ class TimelapseManager:
                         print("Video creation failed")
 
                     current_session = None
+                    current_job_id = None
                     frame_count = 0
 
                 # Capture frames if recording
@@ -234,7 +253,6 @@ class TimelapseManager:
                             print(f"Frame {frame_count} captured", end="\r", flush=True)
                         last_capture = now
 
-                was_printing = is_printing
                 time.sleep(min(check_interval, self.config.capture_interval))
 
             except KeyboardInterrupt:
