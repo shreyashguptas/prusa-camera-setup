@@ -351,20 +351,23 @@ def check_prerequisites() -> bool:
 
 
 def setup_prusa_connect(config: Config) -> bool:
-    """Configure Prusa Connect credentials."""
-    print_header("Prusa Connect Setup")
+    """Configure Prusa Connect and PrusaLink credentials."""
+    print_header("Prusa Connect & PrusaLink Setup")
 
-    print("You need the following from Prusa Connect (connect.prusa3d.com):")
+    print("You need credentials from two sources:")
     print()
-    print("1. Printer UUID - Found in the URL when viewing your printer")
-    print("   Example: https://connect.prusa3d.com/printers/YOUR-UUID-HERE")
+    print("FROM PRUSA CONNECT (connect.prusa3d.com):")
+    print("  1. Printer UUID - Found in the URL when viewing your printer")
+    print("     Example: https://connect.prusa3d.com/printers/YOUR-UUID-HERE")
     print()
-    print("2. Camera Token - Generate from 'Add Camera' on your printer page")
-    print("   (20 character token)")
+    print("  2. Camera Token - Generate from 'Add Camera' on your printer page")
+    print("     (20 character token)")
     print()
-    print("3. API Key - Generate from Account > API Access")
-    print("   Select 'PrusaConnect API Key' (NOT PrusaLink API Key)")
-    print("   (Used for auto-detecting print start/stop)")
+    print("FROM YOUR PRINTER (Settings > Network > PrusaLink):")
+    print("  3. API Key - The PrusaLink API key shown on your printer")
+    print("     (Used for auto-detecting print start/stop)")
+    print()
+    print("  4. Printer IP - Your printer's local IP address")
     print()
 
     # Printer UUID
@@ -383,11 +386,11 @@ def setup_prusa_connect(config: Config) -> bool:
         return False
     config.set("prusa", "camera_token", camera_token)
 
-    # API Key
+    # PrusaLink API Key
     current_api_key = config.api_key
-    api_key = prompt("API Key (for auto-detection)", current_api_key)
+    api_key = prompt("PrusaLink API Key", current_api_key)
     if not api_key:
-        print("API key is required for auto-detection.")
+        print("PrusaLink API key is required for auto-detection.")
         return False
     config.set("prusa", "api_key", api_key)
 
