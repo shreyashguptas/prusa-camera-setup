@@ -27,8 +27,8 @@ class TimelapseManager:
             quality=config.camera_quality,
         )
         self.printer = PrinterStatus(
+            printer_ip=config.printer_ip,
             api_key=config.api_key,
-            printer_uuid=config.printer_uuid,
         )
         self.storage_path = Path(config.nas_mount_point)
 

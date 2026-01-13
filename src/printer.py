@@ -1,4 +1,4 @@
-"""Prusa Connect API for printer status monitoring."""
+"""PrusaLink local API for printer status monitoring."""
 
 import requests
 from typing import Optional
@@ -16,36 +16,35 @@ class PrinterState:
 
 
 class PrinterStatus:
-    """Monitors printer status via Prusa Connect API."""
+    """Monitors printer status via PrusaLink local API."""
 
-    API_BASE = "https://connect.prusa3d.com/api/v1"
-
-    def __init__(self, api_key: str, printer_uuid: str):
+    def __init__(self, printer_ip: str, api_key: str):
         """
         Initialize printer status monitor.
 
         Args:
-            api_key: PrusaConnect API key from Account > API Access
-            printer_uuid: Printer UUID from the printer URL
+            printer_ip: Printer's local IP address (e.g., 192.168.1.81)
+            api_key: PrusaLink API key (from printer settings)
         """
+        self.printer_ip = printer_ip
         self.api_key = api_key
-        self.printer_uuid = printer_uuid
+        self.base_url = f"http://{printer_ip}"
 
     def _get_headers(self) -> dict:
         """Get API request headers."""
         return {
-            "Authorization": f"Bearer {self.api_key}",
+            "X-Api-Key": self.api_key,
             "Accept": "application/json",
         }
 
-    def get_status(self, timeout: int = 15) -> Optional[PrinterState]:
+    def get_status(self, timeout: int = 10) -> Optional[PrinterState]:
         """
-        Get current printer status.
+        Get current printer status from PrusaLink.
 
         Returns:
             PrinterState object or None on error.
         """
-        url = f"{self.API_BASE}/printers/{self.printer_uuid}/status"
+        url = f"{self.base_url}/api/v1/status"
 
         try:
             response = requests.get(
@@ -59,26 +58,22 @@ class PrinterStatus:
 
             data = response.json()
 
-            # Parse printer state
-            is_printing = False
-            state_text = "UNKNOWN"
-            job_name = None
-            progress = None
+            # Parse PrusaLink response
+            job = data.get("job", {})
+            printer = data.get("printer", {})
 
-            # Check job state
-            if "job" in data and data["job"]:
-                job = data["job"]
-                state_text = job.get("state", "UNKNOWN")
-                is_printing = state_text == "PRINTING"
-                job_name = job.get("display_name")
-                progress = job.get("progress")
+            # Job state: PRINTING, PAUSED, FINISHED, STOPPED, ERROR
+            # Printer state: IDLE, BUSY, PRINTING, PAUSED, FINISHED, STOPPED, ERROR, ATTENTION
+            job_state = job.get("state", "")
+            printer_state = printer.get("state", "IDLE")
 
-            # Also check printer state
-            if "printer" in data and data["printer"]:
-                printer = data["printer"]
-                if "state" in printer:
-                    state_text = printer["state"]
-                    is_printing = state_text == "PRINTING"
+            is_printing = job_state == "PRINTING" or printer_state == "PRINTING"
+            state_text = job_state if job_state else printer_state
+
+            # Get job name and progress if available
+            job_file = job.get("file", {})
+            job_name = job_file.get("display_name") or job_file.get("name") if job_file else None
+            progress = job.get("progress", 0)
 
             return PrinterState(
                 is_printing=is_printing,
@@ -104,7 +99,7 @@ class PrinterStatus:
         Returns:
             Tuple of (success, error_message)
         """
-        url = f"{self.API_BASE}/printers/{self.printer_uuid}/status"
+        url = f"{self.base_url}/api/v1/status"
 
         try:
             response = requests.get(
@@ -117,8 +112,8 @@ class PrinterStatus:
                 return True, None
             elif response.status_code == 401:
                 return False, "Invalid API key"
-            elif response.status_code == 404:
-                return False, "Printer not found (check UUID)"
+            elif response.status_code == 403:
+                return False, "Access forbidden"
             else:
                 return False, f"HTTP {response.status_code}"
 

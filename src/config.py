@@ -16,6 +16,7 @@ class Config:
             "printer_uuid": "",
             "camera_token": "",
             "api_key": "",
+            "printer_ip": "",
         },
         "nas": {
             "ip": "",
@@ -90,6 +91,10 @@ class Config:
         return self.get("prusa", "api_key")
 
     @property
+    def printer_ip(self) -> str:
+        return self.get("prusa", "printer_ip")
+
+    @property
     def nas_ip(self) -> str:
         return self.get("nas", "ip")
 
@@ -139,6 +144,7 @@ class Config:
             self.printer_uuid
             and self.camera_token
             and self.api_key
+            and self.printer_ip
             and self.nas_ip
             and self.nas_share
         )

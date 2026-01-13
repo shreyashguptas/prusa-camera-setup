@@ -391,6 +391,18 @@ def setup_prusa_connect(config: Config) -> bool:
         return False
     config.set("prusa", "api_key", api_key)
 
+    # Printer Local IP (for PrusaLink API)
+    print()
+    print("4. Printer Local IP Address")
+    print("   Find this on your printer: Settings > Network > PrusaLink")
+    print("   Or check your router for the printer's IP address")
+    current_ip = config.printer_ip
+    printer_ip = prompt("Printer IP address", current_ip)
+    if not printer_ip:
+        print("Printer IP is required for auto-detection.")
+        return False
+    config.set("prusa", "printer_ip", printer_ip)
+
     # Test camera connection
     print()
     print("Testing camera upload connection...")
@@ -403,9 +415,9 @@ def setup_prusa_connect(config: Config) -> bool:
         if not confirm("Continue anyway?", default=False):
             return False
 
-    # Test API connection
-    print("Testing API connection...")
-    printer = PrinterStatus(api_key, printer_uuid)
+    # Test PrusaLink API connection
+    print("Testing PrusaLink API connection...")
+    printer = PrinterStatus(printer_ip, api_key)
     ok, error = printer.test_connection()
     if ok:
         print("  API connection: OK")
