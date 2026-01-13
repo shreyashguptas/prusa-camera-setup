@@ -636,7 +636,7 @@ def install_services(config: Config) -> bool:
     print_header("Installing Services")
 
     install_dir = Path(__file__).parent.resolve()
-    user = os.environ.get("USER", "shreyash")
+    user = os.environ.get("USER", "pi")
 
     # Read and customize service templates
     templates_dir = install_dir / "templates"

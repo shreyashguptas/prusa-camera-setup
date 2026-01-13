@@ -1,209 +1,291 @@
 # Prusa Camera Setup
 
-A complete camera system for Prusa 3D printers that:
-- Streams camera feed to Prusa Connect
-- Automatically records timelapses when printing
-- Saves videos to NAS storage
+A plug-and-play camera system for Prusa 3D printers that streams to Prusa Connect and automatically records timelapses to your NAS.
 
-Designed for Raspberry Pi Zero 2 W with camera module.
+## What This Does
 
-## Features
+1. **Live Camera Feed** - See your printer in the Prusa app from anywhere
+2. **Automatic Timelapses** - Recording starts when you print, stops when done
+3. **NAS Storage** - Videos saved directly to your network storage
 
-- **Prusa Connect Integration**: Camera feed visible in Prusa app
-- **Auto-Detection**: Automatically starts/stops timelapse when print begins/ends
-- **NAS Storage**: Saves timelapses directly to your NAS (via TailScale)
-- **YouTube-Ready**: Creates MP4 videos optimized for upload
-- **One-Command Setup**: Interactive `setup.py` handles all configuration
+---
 
-## Prerequisites
+## Hardware You'll Need
 
-### Hardware
-- Raspberry Pi Zero 2 W (or any Pi with camera support)
-- Raspberry Pi Camera Module (v2 or v3)
-- Network connection (WiFi or Ethernet)
+| Component | Recommended | Notes |
+|-----------|-------------|-------|
+| **Raspberry Pi** | Raspberry Pi Zero 2 W | Any Pi with camera port works |
+| **Camera** | Raspberry Pi Camera Module 3 | Or Camera Module 2. Both work great |
+| **Power Supply** | Official Pi power supply | 5V 2.5A minimum |
+| **MicroSD Card** | 16GB+ | For Raspberry Pi OS |
+| **NAS** | TrueNAS, Synology, etc. | Any SMB-compatible storage |
 
-### Software (on Pi)
+### About the Camera
+
+This project uses **`rpicam-still`** from the `rpicam-apps` package - the official Raspberry Pi camera software. It works with:
+
+- **Raspberry Pi Camera Module 3** (recommended) - 12MP, autofocus
+- **Raspberry Pi Camera Module 2** - 8MP, fixed focus
+- **Raspberry Pi Camera Module 3 Wide** - Wider field of view
+- **Raspberry Pi HQ Camera** - For advanced users
+
+**Note:** USB webcams are NOT supported. You need a Pi camera that connects via the ribbon cable.
+
+---
+
+## Quick Start (5 minutes)
+
+### Step 1: Set Up Your Raspberry Pi
+
+Flash Raspberry Pi OS Lite (64-bit) to your SD card using [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
+
+In the imager settings:
+- Enable SSH
+- Set your WiFi credentials
+- Set hostname to `prusacam`
+
+### Step 2: Enable the Camera
+
+SSH into your Pi and enable the camera:
+
 ```bash
-# Update system
-sudo apt update && sudo apt upgrade -y
-
-# Install dependencies
-sudo apt install -y rpicam-apps ffmpeg cifs-utils smbclient python3 python3-pip
-
-# Install TailScale (for NAS access)
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-
-# Install Python requirements
-pip3 install requests simple-term-menu
+ssh pi@prusacam.local
 ```
 
-### Camera Configuration
+Edit the boot config:
+```bash
+sudo nano /boot/firmware/config.txt
+```
 
-Ensure your `/boot/firmware/config.txt` contains:
+Make sure this line exists (add it if missing):
 ```
 camera_auto_detect=1
 ```
 
-Reboot after making changes.
+Reboot:
+```bash
+sudo reboot
+```
 
-### NAS Setup
-- TrueNAS or any SMB-compatible NAS
-- TailScale installed on NAS for secure remote access
-- SMB share created for timelapse storage
+### Step 3: Install Dependencies
 
-## Installation
+SSH back in and run:
 
-1. **Clone the repository on your Pi:**
-   ```bash
-   cd ~
-   git clone https://github.com/YOUR_USERNAME/prusa-camera-setup.git
-   cd prusa-camera-setup
-   ```
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
 
-2. **Run setup:**
-   ```bash
-   python3 setup.py
-   ```
+# Install required packages
+sudo apt install -y git rpicam-apps ffmpeg cifs-utils smbclient python3 python3-pip
 
-3. **Follow the prompts to configure:**
-   - Prusa Connect credentials (UUID, Camera Token, API Key)
-   - NAS connection (IP, share path, credentials)
-   - Timelapse settings (capture interval, video quality)
+# Install TailScale (for secure NAS access)
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
 
-## Getting Prusa Connect Credentials
+### Step 4: Clone and Run Setup
 
-### Printer UUID
-1. Go to [connect.prusa3d.com](https://connect.prusa3d.com)
-2. Click on your printer
-3. Copy the UUID from the URL:
-   `https://connect.prusa3d.com/printers/YOUR-UUID-HERE`
+```bash
+cd ~
+git clone https://github.com/shreyashguptas/prusa-camera-setup.git
+cd prusa-camera-setup
+python3 setup.py
+```
 
-### Camera Token
-1. On your printer page, click "Add Camera"
-2. Generate a new camera token (20 characters)
+The setup wizard will guide you through:
+1. Entering your Prusa Connect credentials
+2. Connecting to your NAS
+3. Configuring timelapse settings
+4. Installing the services
 
-### API Key (PrusaLink)
-1. On your printer, go to Settings > Network > PrusaLink
-2. Note the API key shown there (or find it in Prusa Connect under your printer's Settings tab)
-3. This is used for auto-detecting print start/stop via the local PrusaLink API
+**That's it!** Your camera will now stream to Prusa Connect and automatically record timelapses.
 
-### Printer IP Address
-1. On your printer, go to Settings > Network > PrusaLink
-2. Note the IP address shown
-3. Or check your router for the printer's IP address
+---
+
+## Getting Your Credentials
+
+You'll need these during setup:
+
+### From Prusa Connect (connect.prusa3d.com)
+
+1. **Printer UUID**
+   - Go to your printer's page on Prusa Connect
+   - Copy the UUID from the URL: `https://connect.prusa3d.com/printers/YOUR-UUID-HERE`
+
+2. **Camera Token**
+   - On your printer's page, click "Add Camera"
+   - Click "Generate" to create a new camera token (20 characters)
+
+### From Your Printer
+
+3. **PrusaLink API Key**
+   - On your printer: Settings > Network > PrusaLink
+   - Note the API key shown
+
+4. **Printer IP Address**
+   - On your printer: Settings > Network > PrusaLink
+   - Note the IP address (e.g., `192.168.1.81`)
+
+---
+
+## How It Works
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  Pi Camera      │────▶│  Raspberry Pi    │────▶│  Prusa Connect  │
+│  (captures)     │     │  (processes)     │     │  (live view)    │
+└─────────────────┘     └────────┬─────────┘     └─────────────────┘
+                                 │
+                                 ▼
+                        ┌────────────────┐
+                        │  Your Printer  │
+                        │  (PrusaLink)   │
+                        └────────┬───────┘
+                                 │ "Is it printing?"
+                                 ▼
+                        ┌────────────────┐
+                        │  Your NAS      │
+                        │  (timelapses)  │
+                        └────────────────┘
+```
+
+**Services running on your Pi:**
+- `prusacam.service` - Uploads camera snapshots to Prusa Connect every 12 seconds
+- `timelapse-monitor.service` - Watches for prints, captures frames, creates videos
+
+---
 
 ## Configuration
 
-All configuration is stored in `~/.prusa_camera_config` (not in git).
+All settings are stored in `~/.prusa_camera_config`:
 
-Example configuration:
 ```ini
 [prusa]
-printer_uuid = abc123-def456-...
+printer_uuid = your-printer-uuid
 camera_token = XXXXXXXXXXXXXXXXXXXX
 api_key = your_prusalink_api_key
-printer_ip = your_printer_ip_here
+printer_ip = 192.168.1.81
 
 [nas]
-ip = your_nas_ip_here
-share = storage/youtube-videos/printer-footage
+ip = 100.x.x.x
+share = storage/printer-footage
 mount_point = /mnt/nas/printer-footage
 username = your_smb_user
 
 [timelapse]
-capture_interval = 30
-video_fps = 30
-video_quality = 20
+capture_interval = 30    # Seconds between frames
+video_fps = 30           # Output video framerate
+video_quality = 20       # FFmpeg CRF (lower = better quality)
 
 [camera]
 width = 1704
 height = 1278
-quality = 85
-upload_interval = 12
+quality = 85             # JPEG quality
+upload_interval = 12     # Seconds between Prusa Connect uploads
 ```
+
+To change settings, either edit this file or run `python3 setup.py` again.
+
+---
 
 ## Usage
 
-### Automatic Mode (Default)
-Once setup is complete, the system runs automatically:
-- Camera uploads to Prusa Connect every 12 seconds
+### Automatic Mode (default)
+
+Once set up, everything is automatic:
+- Camera uploads to Prusa Connect continuously
 - When a print starts, timelapse recording begins
-- When print ends, video is created and saved to NAS
+- When the print ends, an MP4 video is created and saved to your NAS
 
 ### Manual Timelapse Control
+
 ```bash
-# Start recording
-echo "my_print_name" > ~/.timelapse_recording
+# Start a manual recording
+echo "my_project_name" > ~/.timelapse_recording
 
-# Check status
-cat ~/.timelapse_recording
-
-# Stop recording (triggers video creation)
+# Stop recording (video will be created)
 rm ~/.timelapse_recording
 ```
 
-### Service Management
+### Managing Services
+
 ```bash
-# Check service status
+# Check status
 systemctl status prusacam
 systemctl status timelapse-monitor
 
-# View logs
-journalctl -u prusacam -f
+# View live logs
 journalctl -u timelapse-monitor -f
 
-# Restart services
-sudo systemctl restart prusacam
-sudo systemctl restart timelapse-monitor
+# Restart after config changes
+sudo systemctl restart prusacam timelapse-monitor
 ```
+
+---
 
 ## Troubleshooting
 
 ### Camera not working
+
 ```bash
-# Test camera
+# Test the camera
 rpicam-still -o test.jpg
 
 # Check if camera is detected
-vcgencmd get_camera
+rpicam-hello --list-cameras
 ```
+
+If no camera is found:
+1. Check the ribbon cable connection
+2. Make sure `camera_auto_detect=1` is in `/boot/firmware/config.txt`
+3. Reboot
 
 ### NAS not mounting
-```bash
-# Test connectivity
-ping YOUR_NAS_IP
 
-# Check TailScale
+```bash
+# Check TailScale connection
 tailscale status
 
+# Test NAS connectivity
+ping YOUR_NAS_IP
+
 # Try manual mount
-sudo mount -t cifs //NAS_IP/share /mnt/nas -o credentials=/etc/smbcredentials
+sudo mount -t cifs //NAS_IP/share /mnt/nas/printer-footage -o credentials=/etc/smbcredentials
 ```
 
-### API connection failing
-- Verify your API key is from "PrusaConnect API Key" (not PrusaLink)
-- Check the printer UUID matches your printer URL
-- Ensure the API key has not expired
+### Timelapse not starting automatically
+
+```bash
+# Check service logs
+journalctl -u timelapse-monitor -f
+
+# Test printer API connection
+curl -H "X-Api-Key: YOUR_API_KEY" http://YOUR_PRINTER_IP/api/v1/status
+```
+
+---
 
 ## File Structure
+
 ```
 prusa-camera-setup/
-├── setup.py                 # Interactive setup script
+├── setup.py                 # Interactive setup wizard
+├── requirements.txt         # Python dependencies
+├── README.md
 ├── src/
 │   ├── config.py           # Configuration management
 │   ├── camera.py           # Camera capture (rpicam-still)
 │   ├── uploader.py         # Prusa Connect upload
-│   ├── printer.py          # Printer status API
-│   ├── timelapse.py        # Timelapse recording
-│   ├── nas.py              # NAS mount handling
+│   ├── printer.py          # PrusaLink API client
+│   ├── timelapse.py        # Timelapse recording & video creation
+│   ├── nas.py              # NAS/SMB mount handling
 │   └── uploader_service.py # Camera upload daemon
-├── templates/
-│   ├── prusacam.service    # Camera upload systemd unit
-│   └── timelapse-monitor.service
-├── requirements.txt
-└── README.md
+└── templates/
+    ├── prusacam.service
+    └── timelapse-monitor.service
 ```
+
+---
 
 ## License
 
