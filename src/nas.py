@@ -153,6 +153,47 @@ class NASMount:
         except Exception:
             return False
 
+    def add_to_fstab(self) -> tuple[bool, Optional[str]]:
+        """
+        Add NAS mount to /etc/fstab for automatic mounting on boot.
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        fstab_path = Path("/etc/fstab")
+        fstab_entry = (
+            f"{self.smb_path} {self.mount_point} cifs "
+            f"credentials={self.CREDENTIALS_PATH},uid=1000,gid=1000,_netdev,x-systemd.automount 0 0"
+        )
+
+        try:
+            # Check if already in fstab
+            if fstab_path.exists():
+                current_fstab = fstab_path.read_text()
+                if self.smb_path in current_fstab:
+                    return True, None  # Already configured
+
+            # Append to fstab using sudo
+            result = subprocess.run(
+                ["sudo", "bash", "-c", f"echo '{fstab_entry}' >> /etc/fstab"],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                return False, result.stderr.strip() or "Failed to update fstab"
+
+            # Reload systemd to pick up the automount
+            subprocess.run(
+                ["sudo", "systemctl", "daemon-reload"],
+                capture_output=True,
+            )
+
+            return True, None
+
+        except Exception as e:
+            return False, str(e)
+
     def test_connection(self) -> tuple[bool, Optional[str]]:
         """
         Test connectivity to NAS (ping).

@@ -1,12 +1,12 @@
 [Unit]
 Description=Prusa Timelapse Monitor with Auto-Detection
-After=network-online.target {{MOUNT_UNIT}}
+After=network-online.target
 Wants=network-online.target
-Requires={{MOUNT_UNIT}}
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -m src.timelapse
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u -m src.timelapse
 WorkingDirectory={{INSTALL_DIR}}
 Restart=always
 RestartSec=30

@@ -622,8 +622,6 @@ def install_services(config: Config) -> bool:
 
     install_dir = Path(__file__).parent.resolve()
     user = os.environ.get("USER", "shreyash")
-    mount_point = config.nas_mount_point
-    mount_unit = mount_point.replace("/", "-").lstrip("-") + ".mount"
 
     # Read and customize service templates
     templates_dir = install_dir / "templates"
@@ -644,7 +642,6 @@ def install_services(config: Config) -> bool:
         content = template_path.read_text()
         content = content.replace("{{INSTALL_DIR}}", str(install_dir))
         content = content.replace("{{USER}}", user)
-        content = content.replace("{{MOUNT_UNIT}}", mount_unit)
 
         # Write to temp file and move with sudo
         temp_path = Path(f"/tmp/{service_file}")
@@ -660,8 +657,8 @@ def install_services(config: Config) -> bool:
 
         print(f"  Installed /etc/systemd/system/{service_file}")
 
-    # Create NAS mount unit
-    print("Creating NAS mount unit...")
+    # Configure NAS mount in /etc/fstab (more reliable than systemd mount units)
+    print("Configuring NAS auto-mount in /etc/fstab...")
     nas = NASMount(
         config.nas_ip,
         config.nas_share,
@@ -669,23 +666,17 @@ def install_services(config: Config) -> bool:
         config.nas_username,
     )
 
-    mount_content = nas.get_systemd_mount_unit()
-    temp_path = Path(f"/tmp/{mount_unit}")
-    temp_path.write_text(mount_content)
-
-    subprocess.run(
-        ["sudo", "mv", str(temp_path), f"/etc/systemd/system/{mount_unit}"],
-        capture_output=True,
-    )
+    ok, error = nas.add_to_fstab()
+    if ok:
+        print("  NAS mount configured in /etc/fstab")
+    else:
+        print(f"  Warning: Failed to configure fstab: {error}")
+        print("  NAS may need to be mounted manually")
 
     # Reload systemd and enable services
     print("Enabling services...")
     subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True)
 
-    subprocess.run(
-        ["sudo", "systemctl", "enable", mount_unit],
-        capture_output=True,
-    )
     subprocess.run(
         ["sudo", "systemctl", "enable", "prusacam.service"],
         capture_output=True,
@@ -695,12 +686,17 @@ def install_services(config: Config) -> bool:
         capture_output=True,
     )
 
+    # Mount NAS if not already mounted
+    if not nas.is_mounted():
+        print("Mounting NAS...")
+        ok, error = nas.mount()
+        if ok:
+            print("  NAS mounted successfully")
+        else:
+            print(f"  Warning: NAS mount failed: {error}")
+
     # Start services
     print("Starting services...")
-    subprocess.run(
-        ["sudo", "systemctl", "start", mount_unit],
-        capture_output=True,
-    )
     subprocess.run(
         ["sudo", "systemctl", "start", "prusacam.service"],
         capture_output=True,
