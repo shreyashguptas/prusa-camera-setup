@@ -43,12 +43,14 @@ class TimelapseManager:
             return name if name else None
         return None
 
-    def start_recording(self, name: Optional[str] = None) -> str:
+    def start_recording(self, name: Optional[str] = None, manual: bool = False) -> str:
         """
         Start a new timelapse recording session.
 
         Args:
             name: Optional session name, auto-generated if not provided.
+            manual: If True, write to control file (for manual override sessions).
+                    Auto-detected sessions should NOT write to control file.
 
         Returns:
             Session name.
@@ -57,7 +59,10 @@ class TimelapseManager:
         session_dir = self.storage_path / session_name / "frames"
         session_dir.mkdir(parents=True, exist_ok=True)
 
-        self.CONTROL_FILE.write_text(session_name)
+        # Only write control file for manual sessions
+        # Auto sessions rely on printer status - control file would cause infinite recording
+        if manual:
+            self.CONTROL_FILE.write_text(session_name)
         return session_name
 
     def stop_recording(self) -> Optional[str]:
@@ -213,6 +218,9 @@ class TimelapseManager:
                     if manual_session:
                         current_session = manual_session
                         current_job_id = None  # Manual recordings don't track job ID
+                        # Create session directory (control file already exists from manual creation)
+                        session_dir = self.storage_path / current_session / "frames"
+                        session_dir.mkdir(parents=True, exist_ok=True)
                         print(f"Recording started (manual): {current_session}")
                     else:
                         job_name = status.job_name if status else None
