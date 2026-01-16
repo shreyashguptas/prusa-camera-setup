@@ -1,6 +1,5 @@
 """Timelapse recording and video creation with auto-detection."""
 
-import os
 import sys
 import time
 import shutil
@@ -8,7 +7,7 @@ import signal
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from .config import Config
 from .camera import Camera
@@ -138,109 +137,221 @@ class TimelapseManager:
         frame_path = frames_dir / f"frame_{frame_number:06d}.jpg"
         return self._copy_with_timeout(snapshot, frame_path, timeout=30)
 
-    def create_video(self, session_name: str) -> Optional[Path]:
+    def mark_ready_for_encoding(self, session_name: str) -> bool:
         """
-        Create timelapse video from captured frames.
+        Mark a session as ready for encoding by creating a marker file.
 
         Args:
             session_name: Session name
 
         Returns:
-            Path to created video or None on failure.
+            True if marker was created successfully.
         """
         session_dir = self.storage_path / session_name
         frames_dir = session_dir / "frames"
-        output_file = session_dir / f"{session_name}.mp4"
+        marker_file = session_dir / ".ready_for_encoding"
 
         if not frames_dir.exists():
-            return None
+            return False
 
         frame_count = len(list(frames_dir.glob("frame_*.jpg")))
         if frame_count == 0:
-            return None
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(self.config.video_fps),
-            "-start_number", "0",
-            "-i", str(frames_dir / "frame_%06d.jpg"),
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", str(self.config.video_quality),
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            str(output_file),
-        ]
+            return False
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-
-            if result.returncode == 0 and output_file.exists():
-                return output_file
-            # Log FFMPEG error for debugging
-            if result.stderr:
-                print(f"FFMPEG error: {result.stderr}")
-            return None
-
-        except subprocess.TimeoutExpired:
-            print("FFMPEG error: Timed out after 10 minutes")
-            return None
+            # Write frame count and timestamp to marker for debugging
+            marker_file.write_text(f"frames={frame_count}\ntimestamp={datetime.now().isoformat()}\n")
+            return True
         except Exception as e:
-            print(f"FFMPEG error: {e}")
-            return None
+            print(f"Failed to create encoding marker: {e}")
+            return False
 
-    def create_video_async(self, session_name: str) -> Optional[subprocess.Popen]:
+    def _create_filelist(self, session_name: str) -> Optional[Path]:
         """
-        Start video creation in background (non-blocking).
+        Create FFmpeg concat demuxer filelist.txt for a session.
 
         Args:
             session_name: Session name
 
         Returns:
-            Popen process handle or None on setup failure.
+            Path to filelist.txt, or None if no frames found.
         """
         session_dir = self.storage_path / session_name
         frames_dir = session_dir / "frames"
-        output_file = session_dir / f"{session_name}.mp4"
+        filelist_path = session_dir / "filelist.txt"
 
         if not frames_dir.exists():
             return None
 
-        frame_count = len(list(frames_dir.glob("frame_*.jpg")))
-        if frame_count == 0:
+        # Get sorted frame files
+        frames = sorted(frames_dir.glob("frame_*.jpg"))
+        if not frames:
             return None
 
-        # Use nice to lower FFMPEG priority so it doesn't starve frame capture
-        cmd = [
-            "nice", "-n", "10",
-            "ffmpeg", "-y",
-            "-framerate", str(self.config.video_fps),
-            "-start_number", "0",
-            "-i", str(frames_dir / "frame_%06d.jpg"),
+        # Write filelist in concat demuxer format
+        try:
+            with open(filelist_path, "w") as f:
+                for frame in frames:
+                    # Use absolute path and escape single quotes
+                    escaped_path = str(frame).replace("'", "'\\''")
+                    f.write(f"file '{escaped_path}'\n")
+            return filelist_path
+        except Exception as e:
+            print(f"Failed to create filelist: {e}")
+            return None
+
+    def _build_ffmpeg_command(self, session_name: str, filelist_path: Path) -> List[str]:
+        """
+        Build optimized FFmpeg command for Pi Zero 2W.
+
+        Args:
+            session_name: Session name
+            filelist_path: Path to filelist.txt
+
+        Returns:
+            FFmpeg command as list of arguments.
+        """
+        session_dir = self.storage_path / session_name
+        output_path = session_dir / f"{session_name}.mp4"
+
+        return [
+            "ffmpeg",
+            "-f", "concat",
+            "-safe", "0",
+            "-r", str(self.config.video_fps),
+            "-i", str(filelist_path),
             "-c:v", "libx264",
-            "-preset", "medium",
             "-crf", str(self.config.video_quality),
+            "-preset", self.config.video_preset,
+            "-threads", "4",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            str(output_file),
+            "-y",
+            str(output_path),
         ]
 
+    def encode_video_async(self, session_name: str) -> Optional[subprocess.Popen]:
+        """
+        Start background FFmpeg encoding process.
+
+        Args:
+            session_name: Session name
+
+        Returns:
+            Popen process object, or None if encoding couldn't start.
+        """
+        session_dir = self.storage_path / session_name
+        ready_marker = session_dir / ".ready_for_encoding"
+        progress_marker = session_dir / ".encoding_in_progress"
+
+        # Validate session is ready
+        if not ready_marker.exists():
+            return None
+
+        # Create filelist
+        filelist_path = self._create_filelist(session_name)
+        if not filelist_path:
+            print(f"No frames found for session: {session_name}")
+            return None
+
+        # Mark encoding in progress
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
+            progress_marker.write_text(f"started={datetime.now().isoformat()}\n")
+            ready_marker.unlink()
+        except Exception as e:
+            print(f"Failed to update markers: {e}")
+            return None
+
+        # Build and start FFmpeg command
+        cmd = self._build_ffmpeg_command(session_name, filelist_path)
+        log_path = session_dir / "ffmpeg.log"
+
+        try:
+            with open(log_path, "w") as log_file:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            print(f"Encoding started: {session_name} (PID: {process.pid})")
             return process
         except Exception as e:
-            print(f"Failed to start video encoding: {e}")
+            print(f"Failed to start encoding: {e}")
+            # Restore ready marker on failure
+            try:
+                ready_marker.write_text(f"frames=unknown\ntimestamp={datetime.now().isoformat()}\n")
+                progress_marker.unlink(missing_ok=True)
+            except Exception:
+                pass
             return None
+
+    def check_encoding_complete(self, session_name: str, process: subprocess.Popen) -> Tuple[bool, bool]:
+        """
+        Check if encoding process has completed.
+
+        Args:
+            session_name: Session name
+            process: FFmpeg Popen process
+
+        Returns:
+            Tuple of (is_complete, is_success).
+        """
+        session_dir = self.storage_path / session_name
+        progress_marker = session_dir / ".encoding_in_progress"
+        failed_marker = session_dir / ".encoding_failed"
+        output_path = session_dir / f"{session_name}.mp4"
+        filelist_path = session_dir / "filelist.txt"
+
+        # Check if process is still running
+        poll = process.poll()
+        if poll is None:
+            return (False, False)
+
+        # Process has finished
+        is_success = poll == 0 and output_path.exists()
+
+        # Clean up markers
+        try:
+            progress_marker.unlink(missing_ok=True)
+            if is_success:
+                # Clean up filelist on success
+                filelist_path.unlink(missing_ok=True)
+                print(f"Encoding complete: {session_name}")
+            else:
+                # Mark as failed
+                failed_marker.write_text(f"exit_code={poll}\ntimestamp={datetime.now().isoformat()}\n")
+                print(f"Encoding failed: {session_name} (exit code: {poll})")
+        except Exception as e:
+            print(f"Failed to clean up markers: {e}")
+
+        return (True, is_success)
+
+    def find_sessions_to_encode(self) -> List[str]:
+        """
+        Find sessions with .ready_for_encoding marker.
+
+        Returns:
+            List of session names ready for encoding.
+        """
+        if not self.storage_path.exists():
+            return []
+
+        sessions = []
+        try:
+            for session_dir in self.storage_path.iterdir():
+                if session_dir.is_dir():
+                    ready_marker = session_dir / ".ready_for_encoding"
+                    progress_marker = session_dir / ".encoding_in_progress"
+                    output_file = session_dir / f"{session_dir.name}.mp4"
+
+                    # Only include if ready and not already encoding or encoded
+                    if ready_marker.exists() and not progress_marker.exists() and not output_file.exists():
+                        sessions.append(session_dir.name)
+        except Exception as e:
+            print(f"Error scanning for sessions: {e}")
+
+        return sorted(sessions)
 
     def run_monitor(self, check_interval: int = 30):
         """
@@ -252,6 +363,7 @@ class TimelapseManager:
         print("=== Prusa Timelapse Monitor ===")
         print(f"Storage: {self.storage_path}")
         print(f"Capture interval: {self.config.capture_interval}s")
+        print(f"Video encoding: CRF {self.config.video_quality}, preset {self.config.video_preset}")
         print(f"Auto-detect: Enabled (checking every {check_interval}s)")
         print()
         print("Manual control:")
@@ -264,9 +376,6 @@ class TimelapseManager:
         frame_count = 0
         last_capture = 0
 
-        # Resilience: track background video encoding processes
-        pending_videos: list[tuple[str, subprocess.Popen]] = []
-
         # Resilience: debounce printer status to avoid false stops
         not_printing_count = 0
         STOP_THRESHOLD = 3  # Require 3 consecutive "not printing" to stop
@@ -275,18 +384,18 @@ class TimelapseManager:
         capture_success = 0
         capture_failed = 0
 
+        # Encoding state
+        encoding_process: Optional[subprocess.Popen] = None
+        encoding_session: Optional[str] = None
+
         while True:
             try:
-                # Check for completed background video encodings (non-blocking)
-                for session, proc in pending_videos[:]:
-                    if proc.poll() is not None:
-                        if proc.returncode == 0:
-                            output_file = self.storage_path / session / f"{session}.mp4"
-                            print(f"\nVideo created: {output_file}")
-                        else:
-                            stderr = proc.stderr.read().decode() if proc.stderr else ""
-                            print(f"\nVideo encoding failed for {session}: {stderr[:200]}")
-                        pending_videos.remove((session, proc))
+                # Check encoding progress
+                if encoding_process and encoding_session:
+                    is_complete, is_success = self.check_encoding_complete(encoding_session, encoding_process)
+                    if is_complete:
+                        encoding_process = None
+                        encoding_session = None
 
                 # Check for manual override
                 manual_session = self._get_active_session()
@@ -329,14 +438,12 @@ class TimelapseManager:
                 if current_session and current_job_id and job_id and job_id != current_job_id:
                     print(f"\nJob changed ({current_job_id} -> {job_id}), finalizing previous recording...")
                     print(f"Recording stopped: {current_session}")
-                    # Start video encoding in background (non-blocking)
-                    proc = self.create_video_async(current_session)
-                    if proc:
-                        print(f"Video encoding started in background: {current_session}")
-                        pending_videos.append((current_session, proc))
+                    # Mark session ready for encoding
+                    if self.mark_ready_for_encoding(current_session):
+                        print(f"Marked ready for encoding: {current_session}")
                     else:
-                        print("Video encoding failed to start (no frames?)")
-                    # Reset for new recording immediately - don't wait for encoding
+                        print("Failed to mark for encoding (no frames?)")
+                    # Reset for new recording immediately
                     current_session = None
                     current_job_id = None
                     frame_count = 0
@@ -374,13 +481,11 @@ class TimelapseManager:
                     if total > 0:
                         rate = capture_success / total * 100
                         print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
-                    # Start video encoding in background (non-blocking)
-                    proc = self.create_video_async(current_session)
-                    if proc:
-                        print(f"Video encoding started in background: {current_session}")
-                        pending_videos.append((current_session, proc))
+                    # Mark session ready for encoding
+                    if self.mark_ready_for_encoding(current_session):
+                        print(f"Marked ready for encoding: {current_session}")
                     else:
-                        print("Video encoding failed to start (no frames?)")
+                        print("Failed to mark for encoding (no frames?)")
 
                     current_session = None
                     current_job_id = None
@@ -406,26 +511,28 @@ class TimelapseManager:
                             rate = capture_success / total * 100
                             print(f"\nCapture rate: {rate:.1f}% ({capture_success}/{total})")
 
+                # Start encoding if not recording and not already encoding
+                if not current_session and not encoding_process:
+                    sessions_to_encode = self.find_sessions_to_encode()
+                    if sessions_to_encode:
+                        encoding_session = sessions_to_encode[0]
+                        encoding_process = self.encode_video_async(encoding_session)
+                        if not encoding_process:
+                            encoding_session = None
+
                 time.sleep(min(check_interval, self.config.capture_interval))
 
             except KeyboardInterrupt:
                 print("\n\nStopping monitor...")
                 if current_session:
-                    print(f"Creating video for {current_session}...")
+                    print(f"Finalizing session: {current_session}...")
                     self.stop_recording()
-                    # Use blocking create_video for graceful shutdown
-                    video_path = self.create_video(current_session)
-                    if video_path:
-                        print(f"Video created: {video_path}")
-                # Wait for any pending background encodings
-                if pending_videos:
-                    print(f"Waiting for {len(pending_videos)} background encoding(s) to finish...")
-                    for session, proc in pending_videos:
-                        proc.wait()
-                        if proc.returncode == 0:
-                            print(f"Video created: {session}")
-                        else:
-                            print(f"Video failed: {session}")
+                    if self.mark_ready_for_encoding(current_session):
+                        print(f"Marked ready for encoding: {current_session}")
+                    else:
+                        print("No frames to encode")
+                if encoding_process and encoding_session:
+                    print(f"Encoding in progress: {encoding_session} (will continue in background)")
                 break
             except Exception as e:
                 print(f"\nError: {e}")

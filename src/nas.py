@@ -1,6 +1,5 @@
 """NAS/SMB mount handling for timelapse storage."""
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional

@@ -22,7 +22,6 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import Config
-from src.camera import Camera
 from src.uploader import PrusaConnectUploader
 from src.printer import PrinterStatus
 from src.nas import NASMount
@@ -592,9 +591,9 @@ def setup_timelapse_settings(config: Config) -> bool:
     print()
     print("Video quality (CRF value):")
     print("  18 = High quality (larger files)")
-    print("  20 = Good quality (recommended)")
-    print("  23 = Medium quality")
-    print("  28 = Lower quality (smaller files)")
+    print("  23 = Good quality")
+    print("  28 = Balanced quality (recommended for Pi)")
+    print("  32 = Lower quality (smaller files)")
     current = config.video_quality
     quality = prompt_int("Video quality (CRF)", current)
     config.set("timelapse", "video_quality", str(quality))
