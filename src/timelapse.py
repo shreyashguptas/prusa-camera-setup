@@ -200,45 +200,53 @@ class TimelapseManager:
             print(f"Failed to create filelist: {e}")
             return None
 
-    def _build_ffmpeg_command(self, session_name: str, filelist_path: Path) -> List[str]:
+    def _build_ffmpeg_command(self, session_name: str, filelist_path: Path) -> Tuple[str, Path, Path]:
         """
         Build optimized FFmpeg command for Pi Zero 2W.
+
+        Encodes to local /tmp first to avoid NAS issues with faststart,
+        then copies to NAS. Returns a shell command string for nohup execution.
 
         Args:
             session_name: Session name
             filelist_path: Path to filelist.txt
 
         Returns:
-            FFmpeg command as list of arguments.
+            Tuple of (shell_command, temp_output_path, final_output_path).
         """
         session_dir = self.storage_path / session_name
-        output_path = session_dir / f"{session_name}.mp4"
+        temp_output = Path(f"/tmp/{session_name}.mp4")
+        final_output = session_dir / f"{session_name}.mp4"
+        log_path = session_dir / "ffmpeg.log"
 
-        return [
-            "ffmpeg",
-            "-f", "concat",
-            "-safe", "0",
-            "-r", str(self.config.video_fps),
-            "-i", str(filelist_path),
-            "-c:v", "libx264",
-            "-crf", str(self.config.video_quality),
-            "-preset", self.config.video_preset,
-            "-threads", "4",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-y",
-            str(output_path),
-        ]
+        # Build FFmpeg command that encodes to /tmp then copies to NAS
+        ffmpeg_cmd = (
+            f"ffmpeg -f concat -safe 0 -r {self.config.video_fps} "
+            f"-i '{filelist_path}' -c:v libx264 -crf {self.config.video_quality} "
+            f"-preset {self.config.video_preset} -threads 4 -pix_fmt yuv420p "
+            f"-movflags +faststart -y '{temp_output}'"
+        )
 
-    def encode_video_async(self, session_name: str) -> Optional[subprocess.Popen]:
+        # Full command: encode, then copy to NAS, then cleanup temp
+        shell_cmd = (
+            f"nohup sh -c '{ffmpeg_cmd} && cp \"{temp_output}\" \"{final_output}\" && "
+            f"rm -f \"{temp_output}\"' > '{log_path}' 2>&1 &"
+        )
+
+        return (shell_cmd, temp_output, final_output)
+
+    def encode_video_async(self, session_name: str) -> Optional[str]:
         """
         Start background FFmpeg encoding process.
+
+        Uses nohup with shell redirection to ensure the process survives
+        service restarts. Encodes to /tmp first, then copies to NAS.
 
         Args:
             session_name: Session name
 
         Returns:
-            Popen process object, or None if encoding couldn't start.
+            Session name if encoding started, None if couldn't start.
         """
         session_dir = self.storage_path / session_name
         ready_marker = session_dir / ".ready_for_encoding"
@@ -262,20 +270,14 @@ class TimelapseManager:
             print(f"Failed to update markers: {e}")
             return None
 
-        # Build and start FFmpeg command
-        cmd = self._build_ffmpeg_command(session_name, filelist_path)
-        log_path = session_dir / "ffmpeg.log"
+        # Build shell command (nohup + redirect, runs fully detached)
+        shell_cmd, temp_path, final_path = self._build_ffmpeg_command(session_name, filelist_path)
 
         try:
-            with open(log_path, "w") as log_file:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            print(f"Encoding started: {session_name} (PID: {process.pid})")
-            return process
+            # Execute via shell - this returns immediately, FFmpeg runs in background
+            subprocess.run(shell_cmd, shell=True, check=False)
+            print(f"Encoding started: {session_name}")
+            return session_name
         except Exception as e:
             print(f"Failed to start encoding: {e}")
             # Restore ready marker on failure
@@ -286,13 +288,15 @@ class TimelapseManager:
                 pass
             return None
 
-    def check_encoding_complete(self, session_name: str, process: subprocess.Popen) -> Tuple[bool, bool]:
+    def check_encoding_complete(self, session_name: str) -> Tuple[bool, bool]:
         """
-        Check if encoding process has completed.
+        Check if encoding has completed by checking for output file.
+
+        Since encoding runs via nohup in background, we check file existence
+        rather than process state.
 
         Args:
             session_name: Session name
-            process: FFmpeg Popen process
 
         Returns:
             Tuple of (is_complete, is_success).
@@ -301,31 +305,50 @@ class TimelapseManager:
         progress_marker = session_dir / ".encoding_in_progress"
         failed_marker = session_dir / ".encoding_failed"
         output_path = session_dir / f"{session_name}.mp4"
+        temp_path = Path(f"/tmp/{session_name}.mp4")
         filelist_path = session_dir / "filelist.txt"
 
-        # Check if process is still running
-        poll = process.poll()
-        if poll is None:
+        # If output exists on NAS, encoding is complete
+        if output_path.exists() and output_path.stat().st_size > 1000:
+            # Clean up markers
+            try:
+                progress_marker.unlink(missing_ok=True)
+                filelist_path.unlink(missing_ok=True)
+                temp_path.unlink(missing_ok=True)
+                print(f"Encoding complete: {session_name}")
+            except Exception as e:
+                print(f"Failed to clean up: {e}")
+            return (True, True)
+
+        # If temp file exists but not output, still encoding
+        if temp_path.exists():
             return (False, False)
 
-        # Process has finished
-        is_success = poll == 0 and output_path.exists()
+        # If progress marker exists but no temp/output, check for FFmpeg process
+        if progress_marker.exists():
+            # Check if FFmpeg is still running for this session
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", f"ffmpeg.*{session_name}"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    return (False, False)  # Still running
+            except Exception:
+                pass
 
-        # Clean up markers
-        try:
-            progress_marker.unlink(missing_ok=True)
-            if is_success:
-                # Clean up filelist on success
-                filelist_path.unlink(missing_ok=True)
-                print(f"Encoding complete: {session_name}")
-            else:
-                # Mark as failed
-                failed_marker.write_text(f"exit_code={poll}\ntimestamp={datetime.now().isoformat()}\n")
-                print(f"Encoding failed: {session_name} (exit code: {poll})")
-        except Exception as e:
-            print(f"Failed to clean up markers: {e}")
+            # FFmpeg not running but no output - failed
+            try:
+                progress_marker.unlink(missing_ok=True)
+                failed_marker.write_text(f"reason=no_output\ntimestamp={datetime.now().isoformat()}\n")
+                print(f"Encoding failed: {session_name} (no output file)")
+            except Exception:
+                pass
+            return (True, False)
 
-        return (True, is_success)
+        # No markers, no temp, no output - not encoding
+        return (True, False)
 
     def find_sessions_to_encode(self) -> List[str]:
         """
@@ -384,17 +407,15 @@ class TimelapseManager:
         capture_success = 0
         capture_failed = 0
 
-        # Encoding state
-        encoding_process: Optional[subprocess.Popen] = None
+        # Encoding state (just track session name, FFmpeg runs via nohup)
         encoding_session: Optional[str] = None
 
         while True:
             try:
                 # Check encoding progress
-                if encoding_process and encoding_session:
-                    is_complete, is_success = self.check_encoding_complete(encoding_session, encoding_process)
+                if encoding_session:
+                    is_complete, is_success = self.check_encoding_complete(encoding_session)
                     if is_complete:
-                        encoding_process = None
                         encoding_session = None
 
                 # Check for manual override
@@ -512,13 +533,13 @@ class TimelapseManager:
                             print(f"\nCapture rate: {rate:.1f}% ({capture_success}/{total})")
 
                 # Start encoding if not recording and not already encoding
-                if not current_session and not encoding_process:
+                if not current_session and not encoding_session:
                     sessions_to_encode = self.find_sessions_to_encode()
                     if sessions_to_encode:
-                        encoding_session = sessions_to_encode[0]
-                        encoding_process = self.encode_video_async(encoding_session)
-                        if not encoding_process:
-                            encoding_session = None
+                        session_to_encode = sessions_to_encode[0]
+                        result = self.encode_video_async(session_to_encode)
+                        if result:
+                            encoding_session = session_to_encode
 
                 time.sleep(min(check_interval, self.config.capture_interval))
 
@@ -531,7 +552,7 @@ class TimelapseManager:
                         print(f"Marked ready for encoding: {current_session}")
                     else:
                         print("No frames to encode")
-                if encoding_process and encoding_session:
+                if encoding_session:
                     print(f"Encoding in progress: {encoding_session} (will continue in background)")
                 break
             except Exception as e:
