@@ -431,25 +431,20 @@ class TimelapseManager:
                     continue
 
                 is_printing = status.is_printing
+                has_active_job = status.is_job_active
                 job_id = status.job_id
 
-                # Determine if we should be recording
-                should_record = is_printing or manual_session is not None
+                # Session management:
+                # - Keep session open while job is active (including PAUSED/ATTENTION states)
+                # - Only capture frames when actively printing
+                should_keep_session = has_active_job or manual_session is not None
+                should_capture = is_printing or manual_session is not None
 
-                # Resilience: debounce stop decision
-                if not should_record and current_session and not manual_session:
+                # Resilience: debounce stop decision (only when job becomes inactive, not just paused)
+                if not should_keep_session and current_session and not manual_session:
                     not_printing_count += 1
                     if not_printing_count < STOP_THRESHOLD:
-                        # Don't stop yet, keep capturing
-                        now = time.time()
-                        if now - last_capture >= self.config.capture_interval:
-                            if self.capture_frame(current_session, frame_count):
-                                frame_count += 1
-                                capture_success += 1
-                                print(f"Frame {frame_count} captured (debounce {not_printing_count}/{STOP_THRESHOLD})", end="\r", flush=True)
-                            else:
-                                capture_failed += 1
-                            last_capture = now
+                        # Don't stop yet - job might just be in transition
                         time.sleep(min(check_interval, self.config.capture_interval))
                         continue
                 else:
@@ -470,7 +465,7 @@ class TimelapseManager:
                     frame_count = 0
 
                 # Handle state transitions
-                if should_record and current_session is None:
+                if should_keep_session and current_session is None:
                     # Start recording
                     if manual_session:
                         current_session = manual_session
@@ -494,7 +489,7 @@ class TimelapseManager:
                     frame_count = 0
                     last_capture = 0
 
-                elif not should_record and current_session is not None:
+                elif not should_keep_session and current_session is not None:
                     # Stop recording
                     print(f"\nRecording stopped: {current_session}")
                     # Log capture metrics for this session
@@ -514,8 +509,8 @@ class TimelapseManager:
                     capture_success = 0
                     capture_failed = 0
 
-                # Capture frames if recording
-                if current_session:
+                # Capture frames only when actively printing (not during pause/filament change)
+                if current_session and should_capture:
                     now = time.time()
                     if now - last_capture >= self.config.capture_interval:
                         if self.capture_frame(current_session, frame_count):
@@ -531,6 +526,9 @@ class TimelapseManager:
                         if total > 0 and total % 100 == 0:
                             rate = capture_success / total * 100
                             print(f"\nCapture rate: {rate:.1f}% ({capture_success}/{total})")
+                elif current_session and not should_capture:
+                    # Session active but paused - show status without capturing
+                    print(f"Session active, paused ({status.state_text}) - {frame_count} frames", end="\r", flush=True)
 
                 # Start encoding if not recording and not already encoding
                 if not current_session and not encoding_session:

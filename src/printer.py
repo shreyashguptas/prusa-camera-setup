@@ -9,11 +9,16 @@ from dataclasses import dataclass
 class PrinterState:
     """Represents the current printer state."""
 
-    is_printing: bool
+    is_printing: bool  # True only when actively printing
+    is_job_active: bool  # True when job exists and not ended (PRINTING, PAUSED, ATTENTION)
     state_text: str
     job_id: Optional[int] = None
     job_name: Optional[str] = None
     progress: Optional[float] = None
+
+
+# Terminal states that mean the job has ended
+TERMINAL_STATES = {"FINISHED", "STOPPED", "ERROR"}
 
 
 class PrinterStatus:
@@ -77,8 +82,13 @@ class PrinterStatus:
             job_name = job_file.get("display_name") or job_file.get("name") if job_file else None
             progress = job.get("progress", 0)
 
+            # Job is active if it exists and hasn't reached a terminal state
+            # This remains True during PAUSED/ATTENTION states
+            is_job_active = job_id is not None and job_state not in TERMINAL_STATES
+
             return PrinterState(
                 is_printing=is_printing,
+                is_job_active=is_job_active,
                 state_text=state_text,
                 job_id=job_id,
                 job_name=job_name,
