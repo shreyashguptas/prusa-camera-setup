@@ -16,6 +16,16 @@ A plug-and-play Raspberry Pi camera system for Prusa 3D printers that does two t
 
 ---
 
+## Creating Timelapse Videos
+
+This system captures frames only. To create timelapse videos from your captured frames, use the companion app:
+
+**[Timelapse Creator](https://github.com/shreyashguptas/timelapse-creator)** - A desktop app to turn your captured frames into timelapse videos.
+
+Simply point it at your NAS folder containing the frames, and it will generate a video file for you.
+
+---
+
 ## Hardware You'll Need
 
 | Component | Recommended | Notes |
