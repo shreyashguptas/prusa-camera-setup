@@ -232,7 +232,6 @@ def check_prerequisites() -> bool:
     checks = [
         ("camera_auto_detect=1", check_camera_config(), None, None, None),
         ("rpicam-still", shutil.which("rpicam-still") is not None, "rpicam-apps", None, None),
-        ("ffmpeg", shutil.which("ffmpeg") is not None, "ffmpeg", None, None),
         ("TailScale", shutil.which("tailscale") is not None, None, None, "curl -fsSL https://tailscale.com/install.sh | sh"),
         ("cifs-utils", Path("/sbin/mount.cifs").exists(), "cifs-utils", None, None),
         ("smbclient", shutil.which("smbclient") is not None, "smbclient", None, None),
@@ -570,37 +569,6 @@ def setup_nas(config: Config) -> bool:
     return True
 
 
-def setup_timelapse_settings(config: Config) -> bool:
-    """Configure timelapse settings."""
-    print_header("Timelapse Settings")
-
-    print("Configure how timelapses are captured and created.")
-    print()
-
-    # Capture interval
-    current = config.capture_interval
-    interval = prompt_int("Capture interval (seconds)", current)
-    config.set("timelapse", "capture_interval", str(interval))
-
-    # Video FPS
-    current = config.video_fps
-    fps = prompt_int("Video FPS", current)
-    config.set("timelapse", "video_fps", str(fps))
-
-    # Video quality
-    print()
-    print("Video quality (CRF value):")
-    print("  18 = High quality (larger files)")
-    print("  23 = Good quality")
-    print("  28 = Balanced quality (recommended for Pi)")
-    print("  32 = Lower quality (smaller files)")
-    current = config.video_quality
-    quality = prompt_int("Video quality (CRF)", current)
-    config.set("timelapse", "video_quality", str(quality))
-
-    return True
-
-
 def setup_camera_settings(config: Config) -> bool:
     """Configure camera settings."""
     print_header("Camera Settings")
@@ -767,12 +735,7 @@ def main():
     # Save config after NAS setup
     config.save()
 
-    # Step 4: Timelapse Settings
-    if not setup_timelapse_settings(config):
-        print("Setup cancelled.")
-        sys.exit(1)
-
-    # Step 5: Camera Settings (optional)
+    # Step 4: Camera Settings (optional)
     if confirm("Configure advanced camera settings?", default=False):
         setup_camera_settings(config)
 
@@ -792,11 +755,11 @@ def main():
     print("What happens now:")
     print("  1. Camera uploads snapshots to Prusa Connect every",
           f"{config.upload_interval}s")
-    print("  2. When you start a print, timelapse recording begins automatically")
-    print("  3. When print completes, video is created and saved to NAS")
+    print("  2. When you start a print, timelapse frames are captured automatically")
+    print("  3. Frames are saved to NAS as JPEGs for external processing")
     print()
-    print("Videos will be saved to:")
-    print(f"  {config.nas_mount_point}/")
+    print("Frames will be saved to:")
+    print(f"  {config.nas_mount_point}/<session>/frames/")
     print()
     print("Manual timelapse control:")
     print("  Start: echo 'my_print' > ~/.timelapse_recording")

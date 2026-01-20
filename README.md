@@ -1,17 +1,16 @@
-# Prusa Connect App and Timelapse Recording Setup
+# Prusa Connect App and Timelapse Frame Capture
 
-**Live camera feed in the Prusa app + automatic timelapse videos saved to your NAS.**
+**Live camera feed in the Prusa app + automatic timelapse frames saved to your NAS.**
 
 A plug-and-play Raspberry Pi camera system for Prusa 3D printers that does two things:
 
 1. **📱 Remote Monitoring** — Stream your print to the Prusa Connect app so you can check on it from anywhere
-2. **🎬 Automatic Timelapses** — Recording starts when you print, stops when done, and saves the video to your NAS
+2. **🎬 Automatic Timelapse Frames** — Frame capture starts when you print, stops when done, and saves JPEGs to your NAS for external video processing
 
 ---
 
 ## How It Works
 
-<!-- TODO: Add system diagram image -->
 ![System Diagram](./docs/system-diagram.png)
 
 
@@ -90,7 +89,7 @@ SSH back in and run:
 sudo apt update && sudo apt upgrade -y
 
 # Install required packages
-sudo apt install -y git rpicam-apps ffmpeg cifs-utils smbclient python3 python3-pip
+sudo apt install -y git rpicam-apps cifs-utils smbclient python3 python3-pip
 
 # Install TailScale (for secure NAS access)
 curl -fsSL https://tailscale.com/install.sh | sh
@@ -109,10 +108,9 @@ python3 setup.py
 The setup wizard will guide you through:
 1. Entering your Prusa Connect credentials
 2. Connecting to your NAS
-3. Configuring timelapse settings
-4. Installing the services
+3. Installing the services
 
-**That's it!** Your camera will now stream to Prusa Connect and automatically record timelapses.
+**That's it!** Your camera will now stream to Prusa Connect and automatically capture timelapse frames to your NAS.
 
 ---
 
@@ -161,8 +159,6 @@ username = your_smb_user
 
 [timelapse]
 capture_interval = 30    # Seconds between frames
-video_fps = 30           # Output video framerate
-video_quality = 20       # FFmpeg CRF (lower = better quality)
 
 [camera]
 width = 1704

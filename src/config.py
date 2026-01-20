@@ -26,9 +26,6 @@ class Config:
         },
         "timelapse": {
             "capture_interval": "30",
-            "video_fps": "30",
-            "video_quality": "28",
-            "video_preset": "veryfast",
         },
         "camera": {
             "width": "1704",
@@ -114,18 +111,6 @@ class Config:
     @property
     def capture_interval(self) -> int:
         return self.get_int("timelapse", "capture_interval", 30)
-
-    @property
-    def video_fps(self) -> int:
-        return self.get_int("timelapse", "video_fps", 30)
-
-    @property
-    def video_quality(self) -> int:
-        return self.get_int("timelapse", "video_quality", 28)
-
-    @property
-    def video_preset(self) -> str:
-        return self.get("timelapse", "video_preset", "veryfast")
 
     @property
     def camera_width(self) -> int:
