@@ -99,6 +99,10 @@ class NASMount:
         Returns:
             Tuple of (success, error_message)
         """
+        # Check if already mounted - return success to avoid stacked mounts
+        if self.is_mounted():
+            return True, None
+
         if not self.CREDENTIALS_PATH.exists():
             return False, "Credentials file not found"
 
