@@ -26,6 +26,8 @@ class Config:
         },
         "timelapse": {
             "capture_interval": "30",
+            "post_print_frames": "4",
+            "post_print_interval": "30",
         },
         "camera": {
             "width": "1704",
@@ -111,6 +113,15 @@ class Config:
     @property
     def capture_interval(self) -> int:
         return self.get_int("timelapse", "capture_interval", 30)
+
+    @property
+    def post_print_frames(self) -> int:
+        return self.get_int("timelapse", "post_print_frames", 4)
+
+    @property
+    def post_print_interval(self) -> int:
+        # Minimum 10 seconds to prevent rapid-fire captures
+        return max(self.get_int("timelapse", "post_print_interval", 30), 10)
 
     @property
     def camera_width(self) -> int:

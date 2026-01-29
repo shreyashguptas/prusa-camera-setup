@@ -146,6 +146,7 @@ class TimelapseManager:
         print("=== Prusa Timelapse Monitor ===")
         print(f"Storage: {self.storage_path}")
         print(f"Capture interval: {self.config.capture_interval}s")
+        print(f"Post-print: {self.config.post_print_frames} frames @ {self.config.post_print_interval}s")
         print(f"Auto-detect: Enabled (checking every {check_interval}s)")
         print()
         print("Manual control:")
@@ -161,6 +162,13 @@ class TimelapseManager:
         # Resilience: debounce printer status to avoid false stops
         not_printing_count = 0
         STOP_THRESHOLD = 3  # Require 3 consecutive "not printing" to stop
+
+        # Post-print capture: capture extra frames after print finishes
+        post_print_mode = False
+        post_print_frames_captured = 0
+        post_print_last_capture = 0
+        post_print_failed_attempts = 0
+        POST_PRINT_MAX_FAILURES = 10  # Give up after this many consecutive failures
 
         # Resilience: track capture metrics
         capture_success = 0
@@ -233,24 +241,91 @@ class TimelapseManager:
 
                     frame_count = 0
                     last_capture = 0
+                    # Reset post-print state when new session starts
+                    post_print_mode = False
+                    post_print_frames_captured = 0
+                    post_print_failed_attempts = 0
 
-                elif not should_keep_session and current_session is not None:
-                    # Stop recording
-                    print(f"\nRecording stopped: {current_session}")
-                    # Log capture metrics for this session
-                    total = capture_success + capture_failed
-                    if total > 0:
-                        rate = capture_success / total * 100
-                        print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
+                elif not should_keep_session and current_session is not None and not post_print_mode:
+                    # Enter post-print capture mode instead of stopping immediately
+                    if self.config.post_print_frames > 0:
+                        post_print_mode = True
+                        post_print_frames_captured = 0
+                        post_print_last_capture = 0
+                        post_print_failed_attempts = 0
+                        print(f"\nPrint finished. Capturing {self.config.post_print_frames} post-print frames...")
+                    else:
+                        # No post-print frames configured, stop immediately
+                        print(f"\nRecording stopped: {current_session}")
+                        total = capture_success + capture_failed
+                        if total > 0:
+                            rate = capture_success / total * 100
+                            print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
+                        current_session = None
+                        current_job_id = None
+                        frame_count = 0
+                        capture_success = 0
+                        capture_failed = 0
 
-                    current_session = None
-                    current_job_id = None
-                    frame_count = 0
-                    capture_success = 0
-                    capture_failed = 0
+                # Handle post-print frame capture
+                if post_print_mode and current_session:
+                    # Check if manual session was created - cancel post-print and switch to manual
+                    if manual_session and manual_session != current_session:
+                        print(f"\nManual session requested, canceling post-print capture...")
+                        print(f"Post-print capture stopped early: {current_session} ({post_print_frames_captured} frames)")
+                        current_session = None
+                        post_print_mode = False
+                        post_print_frames_captured = 0
+                        post_print_failed_attempts = 0
+                        # Will pick up manual session on next iteration
+                        time.sleep(1)
+                        continue
 
-                # Capture frames only when actively printing (not during pause/filament change)
-                if current_session and should_capture:
+                    now = time.time()
+                    if now - post_print_last_capture >= self.config.post_print_interval:
+                        if self.capture_frame(current_session, frame_count):
+                            frame_count += 1
+                            post_print_frames_captured += 1
+                            capture_success += 1
+                            post_print_failed_attempts = 0  # Reset on success
+                            remaining = self.config.post_print_frames - post_print_frames_captured
+                            print(f"Post-print frame {post_print_frames_captured}/{self.config.post_print_frames} captured ({remaining} remaining)", end="\r", flush=True)
+                        else:
+                            capture_failed += 1
+                            post_print_failed_attempts += 1
+                            # Check if we've exceeded max failures
+                            if post_print_failed_attempts >= POST_PRINT_MAX_FAILURES:
+                                print(f"\nPost-print capture aborted: {POST_PRINT_MAX_FAILURES} consecutive failures")
+                                print(f"Session stopped: {current_session} ({post_print_frames_captured}/{self.config.post_print_frames} post-print frames)")
+                                current_session = None
+                                current_job_id = None
+                                frame_count = 0
+                                capture_success = 0
+                                capture_failed = 0
+                                post_print_mode = False
+                                post_print_frames_captured = 0
+                                post_print_failed_attempts = 0
+                                continue
+                        post_print_last_capture = now
+
+                        # Check if we've captured all post-print frames
+                        if post_print_frames_captured >= self.config.post_print_frames:
+                            print(f"\nPost-print capture complete. Recording stopped: {current_session}")
+                            total = capture_success + capture_failed
+                            if total > 0:
+                                rate = capture_success / total * 100
+                                print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
+                            current_session = None
+                            current_job_id = None
+                            frame_count = 0
+                            capture_success = 0
+                            capture_failed = 0
+                            post_print_mode = False
+                            post_print_frames_captured = 0
+                            post_print_failed_attempts = 0
+
+                # Capture frames only when actively printing (not during pause/filament change or post-print)
+                if current_session and should_capture and not post_print_mode:
                     now = time.time()
                     if now - last_capture >= self.config.capture_interval:
                         if self.capture_frame(current_session, frame_count):
@@ -266,7 +341,7 @@ class TimelapseManager:
                         if total > 0 and total % 100 == 0:
                             rate = capture_success / total * 100
                             print(f"\nCapture rate: {rate:.1f}% ({capture_success}/{total})")
-                elif current_session and not should_capture:
+                elif current_session and not should_capture and not post_print_mode:
                     # Session active but paused - show status without capturing
                     print(f"Session active, paused ({status.state_text}) - {frame_count} frames", end="\r", flush=True)
 
