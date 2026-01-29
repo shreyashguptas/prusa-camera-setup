@@ -146,6 +146,7 @@ class TimelapseManager:
         print("=== Prusa Timelapse Monitor ===")
         print(f"Storage: {self.storage_path}")
         print(f"Capture interval: {self.config.capture_interval}s")
+        print(f"Finishing mode: >= {self.config.finishing_threshold}% @ {self.config.finishing_interval}s")
         print(f"Post-print: {self.config.post_print_frames} frames @ {self.config.post_print_interval}s")
         print(f"Auto-detect: Enabled (checking every {check_interval}s)")
         print()
@@ -162,6 +163,9 @@ class TimelapseManager:
         # Resilience: debounce printer status to avoid false stops
         not_printing_count = 0
         STOP_THRESHOLD = 3  # Require 3 consecutive "not printing" to stop
+
+        # Finishing mode: faster capture when print is almost done
+        finishing_mode = False
 
         # Post-print capture: capture extra frames after print finishes
         post_print_mode = False
@@ -199,7 +203,8 @@ class TimelapseManager:
                 should_capture = is_printing or manual_session is not None
 
                 # Resilience: debounce stop decision (only when job becomes inactive, not just paused)
-                if not should_keep_session and current_session and not manual_session:
+                # Skip debounce if in finishing mode - we're confident the print is ending
+                if not should_keep_session and current_session and not manual_session and not finishing_mode:
                     not_printing_count += 1
                     if not_printing_count < STOP_THRESHOLD:
                         # Don't stop yet - job might just be in transition
@@ -212,10 +217,14 @@ class TimelapseManager:
                 if current_session and current_job_id and job_id and job_id != current_job_id:
                     print(f"\nJob changed ({current_job_id} -> {job_id}), finalizing previous session...")
                     print(f"Session stopped: {current_session}")
-                    # Reset for new recording immediately
+                    # Reset all state for new recording immediately
                     current_session = None
                     current_job_id = None
                     frame_count = 0
+                    finishing_mode = False
+                    post_print_mode = False
+                    post_print_frames_captured = 0
+                    post_print_failed_attempts = 0
 
                 # Handle state transitions
                 if should_keep_session and current_session is None:
@@ -241,7 +250,8 @@ class TimelapseManager:
 
                     frame_count = 0
                     last_capture = 0
-                    # Reset post-print state when new session starts
+                    # Reset finishing and post-print state when new session starts
+                    finishing_mode = False
                     post_print_mode = False
                     post_print_frames_captured = 0
                     post_print_failed_attempts = 0
@@ -266,6 +276,7 @@ class TimelapseManager:
                         frame_count = 0
                         capture_success = 0
                         capture_failed = 0
+                        finishing_mode = False
 
                 # Handle post-print frame capture
                 if post_print_mode and current_session:
@@ -274,6 +285,7 @@ class TimelapseManager:
                         print(f"\nManual session requested, canceling post-print capture...")
                         print(f"Post-print capture stopped early: {current_session} ({post_print_frames_captured} frames)")
                         current_session = None
+                        finishing_mode = False
                         post_print_mode = False
                         post_print_frames_captured = 0
                         post_print_failed_attempts = 0
@@ -302,6 +314,7 @@ class TimelapseManager:
                                 frame_count = 0
                                 capture_success = 0
                                 capture_failed = 0
+                                finishing_mode = False
                                 post_print_mode = False
                                 post_print_frames_captured = 0
                                 post_print_failed_attempts = 0
@@ -320,18 +333,34 @@ class TimelapseManager:
                             frame_count = 0
                             capture_success = 0
                             capture_failed = 0
+                            finishing_mode = False
                             post_print_mode = False
                             post_print_frames_captured = 0
                             post_print_failed_attempts = 0
 
                 # Capture frames only when actively printing (not during pause/filament change or post-print)
                 if current_session and should_capture and not post_print_mode:
+                    # Check if we've entered finishing mode (progress >= threshold)
+                    progress = status.progress if status.progress is not None else 0
+                    was_finishing = finishing_mode
+                    finishing_mode = progress >= self.config.finishing_threshold
+
+                    # Announce entering finishing mode
+                    if finishing_mode and not was_finishing:
+                        print(f"\nFinishing mode: {progress:.1f}% - capturing every {self.config.finishing_interval}s")
+
+                    # Use faster interval in finishing mode
+                    current_interval = self.config.finishing_interval if finishing_mode else self.config.capture_interval
+
                     now = time.time()
-                    if now - last_capture >= self.config.capture_interval:
+                    if now - last_capture >= current_interval:
                         if self.capture_frame(current_session, frame_count):
                             frame_count += 1
                             capture_success += 1
-                            print(f"Frame {frame_count} captured", end="\r", flush=True)
+                            if finishing_mode:
+                                print(f"Frame {frame_count} captured ({progress:.1f}% - finishing)", end="\r", flush=True)
+                            else:
+                                print(f"Frame {frame_count} captured ({progress:.1f}%)", end="\r", flush=True)
                         else:
                             capture_failed += 1
                         last_capture = now
@@ -345,7 +374,14 @@ class TimelapseManager:
                     # Session active but paused - show status without capturing
                     print(f"Session active, paused ({status.state_text}) - {frame_count} frames", end="\r", flush=True)
 
-                time.sleep(min(check_interval, self.config.capture_interval))
+                # Use shorter sleep when in finishing mode or post-print mode
+                if post_print_mode:
+                    sleep_interval = min(check_interval, self.config.post_print_interval)
+                elif finishing_mode:
+                    sleep_interval = min(check_interval, self.config.finishing_interval)
+                else:
+                    sleep_interval = min(check_interval, self.config.capture_interval)
+                time.sleep(sleep_interval)
 
             except KeyboardInterrupt:
                 print("\n\nStopping monitor...")

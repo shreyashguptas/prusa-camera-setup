@@ -26,8 +26,10 @@ class Config:
         },
         "timelapse": {
             "capture_interval": "30",
-            "post_print_frames": "4",
-            "post_print_interval": "30",
+            "finishing_threshold": "98",
+            "finishing_interval": "5",
+            "post_print_frames": "24",
+            "post_print_interval": "5",
         },
         "camera": {
             "width": "1704",
@@ -115,13 +117,23 @@ class Config:
         return self.get_int("timelapse", "capture_interval", 30)
 
     @property
+    def finishing_threshold(self) -> int:
+        # Percentage at which to switch to fast capture (0-100)
+        return min(max(self.get_int("timelapse", "finishing_threshold", 98), 0), 100)
+
+    @property
+    def finishing_interval(self) -> int:
+        # Minimum 1 second for finishing mode captures
+        return max(self.get_int("timelapse", "finishing_interval", 5), 1)
+
+    @property
     def post_print_frames(self) -> int:
-        return self.get_int("timelapse", "post_print_frames", 4)
+        return self.get_int("timelapse", "post_print_frames", 24)
 
     @property
     def post_print_interval(self) -> int:
-        # Minimum 10 seconds to prevent rapid-fire captures
-        return max(self.get_int("timelapse", "post_print_interval", 30), 10)
+        # Minimum 1 second to prevent rapid-fire captures
+        return max(self.get_int("timelapse", "post_print_interval", 5), 1)
 
     @property
     def camera_width(self) -> int:
