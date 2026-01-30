@@ -677,14 +677,14 @@ def install_services(config: Config) -> bool:
         else:
             print(f"  Warning: NAS mount failed: {error}")
 
-    # Start services
+    # Restart services (restart ensures new code is loaded even if already running)
     print("Starting services...")
     subprocess.run(
-        ["sudo", "systemctl", "start", "prusacam.service"],
+        ["sudo", "systemctl", "restart", "prusacam.service"],
         capture_output=True,
     )
     subprocess.run(
-        ["sudo", "systemctl", "start", "timelapse-monitor.service"],
+        ["sudo", "systemctl", "restart", "timelapse-monitor.service"],
         capture_output=True,
     )
 
