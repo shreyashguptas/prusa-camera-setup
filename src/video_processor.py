@@ -25,6 +25,30 @@ class VideoProcessor:
         self.storage_path = Path(config.nas_mount_point)
         self._should_stop = False
 
+    def _check_nas_health(self, timeout: int = 5) -> bool:
+        """Quick write test to verify NAS is responsive."""
+        test_file = self.storage_path / ".health_check"
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError("NAS health check timed out")
+
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
+
+        try:
+            test_file.write_text(f"health_check_{time.time()}")
+            test_file.unlink()
+            return True
+        except TimeoutError:
+            print(f"NAS health check timed out ({timeout}s) - skipping processing")
+            return False
+        except Exception as e:
+            print(f"NAS health check failed: {e}")
+            return False
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
     def _log(self, session_path: Path, message: str):
         """Write message to session log file."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -260,11 +284,15 @@ class VideoProcessor:
                 pending = self.find_pending_sessions()
 
                 if pending:
-                    print(f"Found {len(pending)} session(s) ready for processing")
-                    for session_path in pending:
-                        if self._should_stop:
-                            break
-                        self.process_session(session_path)
+                    # Check NAS health before processing
+                    if not self._check_nas_health():
+                        print("Skipping processing cycle - NAS not healthy")
+                    else:
+                        print(f"Found {len(pending)} session(s) ready for processing")
+                        for session_path in pending:
+                            if self._should_stop:
+                                break
+                            self.process_session(session_path)
                 else:
                     print("Waiting for sessions...", end="\r", flush=True)
 
