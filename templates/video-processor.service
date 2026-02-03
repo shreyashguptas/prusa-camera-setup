@@ -11,9 +11,9 @@ WorkingDirectory={{INSTALL_DIR}}
 Restart=always
 RestartSec=60
 User={{USER}}
-MemoryMax=256M
-CPUQuota=80%
-Nice=10
+MemoryMax=400M
+CPUQuota=50%
+Nice=15
 
 [Install]
 WantedBy=multi-user.target

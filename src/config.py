@@ -39,12 +39,10 @@ class Config:
         },
         "video": {
             "enabled": "true",
-            "frame_rate": "15",
+            "frame_rate": "10",
             "rotation": "180",
             "crf": "18",
             "preset": "veryfast",
-            "slow_motion_frames": "5",
-            "slow_motion_fps": "2",
         },
     }
 
@@ -166,7 +164,7 @@ class Config:
 
     @property
     def video_frame_rate(self) -> int:
-        rate = self.get_int("video", "frame_rate", 15)
+        rate = self.get_int("video", "frame_rate", 10)
         return max(1, min(rate, 60))
 
     @property
@@ -186,14 +184,6 @@ class Config:
         preset = self.get("video", "preset", "veryfast")
         valid = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
         return preset if preset in valid else "veryfast"
-
-    @property
-    def slow_motion_frames(self) -> int:
-        return max(0, self.get_int("video", "slow_motion_frames", 5))
-
-    @property
-    def slow_motion_fps(self) -> int:
-        return max(1, self.get_int("video", "slow_motion_fps", 2))
 
     def is_configured(self) -> bool:
         """Check if essential configuration is present."""

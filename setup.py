@@ -660,19 +660,6 @@ def setup_video_settings(config: Config) -> bool:
         crf = max(0, min(crf, 51))
         config.set("video", "crf", str(crf))
 
-        # Slow-motion ending
-        print()
-        print("Slow-motion ending shows final frames at slower speed.")
-        print("Set to 0 to disable slow-motion effect.")
-        current = config.slow_motion_frames
-        slow_frames = prompt_int("Number of frames to slow down", current)
-        config.set("video", "slow_motion_frames", str(max(0, slow_frames)))
-
-        if slow_frames > 0:
-            current = config.slow_motion_fps
-            slow_fps = prompt_int("Slow-motion FPS", current)
-            config.set("video", "slow_motion_fps", str(max(1, slow_fps)))
-
     return True
 
 

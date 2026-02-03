@@ -61,6 +61,25 @@ class VideoProcessor:
             print(f"Warning: Could not write to log: {e}")
         print(message)
 
+    def _log_memory(self, session_path: Path):
+        """Log current system memory status."""
+        try:
+            with open("/proc/meminfo", "r") as f:
+                meminfo = f.read()
+
+            mem_total = 0
+            mem_available = 0
+            for line in meminfo.split("\n"):
+                if line.startswith("MemTotal:"):
+                    mem_total = int(line.split()[1]) // 1024
+                elif line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1]) // 1024
+
+            if mem_total > 0:
+                self._log(session_path, f"System memory: {mem_available}MB free of {mem_total}MB")
+        except Exception:
+            pass  # Not critical if this fails
+
     def _get_rotation_filter(self) -> str:
         """Get FFmpeg video filter for rotation."""
         rotation = self.config.video_rotation
@@ -72,43 +91,13 @@ class VideoProcessor:
             return "transpose=2"
         return ""
 
-    def _create_frame_list(self, session_path: Path) -> Optional[Path]:
-        """Create a file list for FFmpeg concat demuxer."""
+    def _run_ffmpeg(self, session_path: Path, output_path: Path) -> bool:
+        """Run FFmpeg using image sequence input. Returns True on success."""
         frames_dir = session_path / "frames"
-        if not frames_dir.exists():
-            return None
+        frame_pattern = str(frames_dir / "frame_%06d.jpg")
 
-        frames = sorted(frames_dir.glob("frame_*.jpg"))
-        if not frames:
-            return None
-
-        filelist = session_path / "filelist.txt"
-
-        main_fps = self.config.video_frame_rate
-        slow_frames = self.config.slow_motion_frames
-        slow_fps = self.config.slow_motion_fps
-
-        with open(filelist, "w") as f:
-            total_frames = len(frames)
-            slow_start = total_frames - slow_frames if slow_frames > 0 else total_frames
-
-            for i, frame in enumerate(frames):
-                f.write(f"file '{frame.resolve()}'\n")
-                if i < slow_start:
-                    duration = 1.0 / main_fps
-                else:
-                    duration = 1.0 / slow_fps
-                f.write(f"duration {duration:.6f}\n")
-
-            if frames:
-                f.write(f"file '{frames[-1].resolve()}'\n")
-
-        return filelist
-
-    def _run_ffmpeg(self, session_path: Path, filelist: Path, output_path: Path) -> bool:
-        """Run FFmpeg to create video. Returns True on success."""
+        # Build video filter
         vf_parts = []
-
         rotation_filter = self._get_rotation_filter()
         if rotation_filter:
             vf_parts.append(rotation_filter)
@@ -116,9 +105,8 @@ class VideoProcessor:
         cmd = [
             "ffmpeg",
             "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(filelist),
+            "-framerate", str(self.config.video_frame_rate),
+            "-i", frame_pattern,
         ]
 
         if vf_parts:
@@ -129,6 +117,7 @@ class VideoProcessor:
             "-crf", str(self.config.video_crf),
             "-preset", self.config.video_preset,
             "-pix_fmt", "yuv420p",
+            "-threads", "2",
             "-movflags", "+faststart",
             str(output_path),
         ])
@@ -155,6 +144,9 @@ class VideoProcessor:
 
             if process.returncode == 0:
                 return True
+            elif process.returncode == -9:
+                self._log(session_path, "ERROR: FFmpeg killed by signal 9 (likely out of memory)")
+                return False
             else:
                 output = process.stdout.read() if process.stdout else ""
                 self._log(session_path, f"ERROR: FFmpeg failed (code {process.returncode})")
@@ -186,6 +178,7 @@ class VideoProcessor:
             ready_marker.unlink(missing_ok=True)
             return True
 
+        self._log_memory(session_path)
         self._log(session_path, f"Starting video processing for: {session_name}")
 
         try:
@@ -195,21 +188,23 @@ class VideoProcessor:
             return False
 
         try:
-            filelist = self._create_frame_list(session_path)
-            if not filelist:
+            frames_dir = session_path / "frames"
+            if not frames_dir.exists():
+                self._log(session_path, "ERROR: No frames directory found")
+                processing_marker.unlink(missing_ok=True)
+                return False
+
+            frame_count = len(list(frames_dir.glob("frame_*.jpg")))
+            if frame_count == 0:
                 self._log(session_path, "ERROR: No frames found in session")
                 processing_marker.unlink(missing_ok=True)
                 return False
 
-            frames_dir = session_path / "frames"
-            frame_count = len(list(frames_dir.glob("frame_*.jpg")))
             self._log(session_path, f"Found {frame_count} frames")
 
             output_path = session_path / f"{session_name}.mp4"
 
-            success = self._run_ffmpeg(session_path, filelist, output_path)
-
-            filelist.unlink(missing_ok=True)
+            success = self._run_ffmpeg(session_path, output_path)
 
             if success:
                 complete_marker.touch()
@@ -250,6 +245,59 @@ class VideoProcessor:
 
         return sorted(pending, key=lambda p: p.name)
 
+    def _recover_stale_sessions(self, max_age_hours: int = 2):
+        """Recover sessions stuck in processing state."""
+        if not self.storage_path.exists():
+            return
+
+        now = time.time()
+        max_age_seconds = max_age_hours * 3600
+
+        try:
+            for session_dir in self.storage_path.iterdir():
+                if not session_dir.is_dir():
+                    continue
+
+                processing_marker = session_dir / self.PROCESSING_MARKER
+                if not processing_marker.exists():
+                    continue
+
+                # Check if marker is older than max_age
+                marker_age = now - processing_marker.stat().st_mtime
+                if marker_age < max_age_seconds:
+                    continue
+
+                session_name = session_dir.name
+                print(f"Recovering stale session: {session_name} (stuck for {marker_age/3600:.1f} hours)")
+
+                # Delete incomplete video if exists
+                video_file = session_dir / f"{session_name}.mp4"
+                if video_file.exists():
+                    try:
+                        video_file.unlink()
+                        print(f"  Deleted incomplete video: {video_file.name}")
+                    except Exception as e:
+                        print(f"  Warning: Could not delete video: {e}")
+
+                # Delete stale processing marker
+                try:
+                    processing_marker.unlink()
+                    print(f"  Deleted stale processing marker")
+                except Exception as e:
+                    print(f"  Warning: Could not delete marker: {e}")
+
+                # Ensure ready_for_video exists so it will be retried
+                ready_marker = session_dir / self.READY_MARKER
+                if not ready_marker.exists():
+                    try:
+                        ready_marker.touch()
+                        print(f"  Created ready marker for retry")
+                    except Exception as e:
+                        print(f"  Warning: Could not create ready marker: {e}")
+
+        except Exception as e:
+            print(f"Error during recovery scan: {e}")
+
     def run_monitor(self, check_interval: int = 60):
         """Run the video processor monitor loop."""
         print("=== Prusa Video Processor ===")
@@ -260,7 +308,6 @@ class VideoProcessor:
         print(f"  Rotation: {self.config.video_rotation} degrees")
         print(f"  Quality (CRF): {self.config.video_crf}")
         print(f"  Preset: {self.config.video_preset}")
-        print(f"  Slow-motion: last {self.config.slow_motion_frames} frames @ {self.config.slow_motion_fps} FPS")
         print()
         print(f"Checking for completed sessions every {check_interval}s")
         print()
@@ -278,6 +325,10 @@ class VideoProcessor:
 
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
+
+        # Recover any stale sessions before starting
+        self._recover_stale_sessions()
+        print()
 
         while not self._should_stop:
             try:
