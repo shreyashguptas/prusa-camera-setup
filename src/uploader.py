@@ -21,7 +21,7 @@ class PrusaConnectUploader:
         self.camera_token = camera_token
         self.fingerprint = fingerprint if len(fingerprint) >= 16 else fingerprint + "0" * (16 - len(fingerprint))
 
-    def upload(self, image_path: Path, timeout: int = 30) -> bool:
+    def upload(self, image_path: Path, timeout: int = 30) -> tuple[bool, Optional[str]]:
         """
         Upload an image to Prusa Connect.
 
@@ -30,10 +30,10 @@ class PrusaConnectUploader:
             timeout: Request timeout in seconds
 
         Returns:
-            True if upload successful, False otherwise.
+            Tuple of (success, error_message). error_message is None on success.
         """
         if not image_path.exists():
-            return False
+            return False, "Image file not found"
 
         headers = {
             "Content-Type": "image/jpg",
@@ -49,9 +49,20 @@ class PrusaConnectUploader:
                     data=f.read(),
                     timeout=timeout,
                 )
-            return response.status_code in (200, 204)
-        except requests.RequestException:
-            return False
+            if response.status_code in (200, 204):
+                return True, None
+            error_detail = ""
+            try:
+                error_detail = response.json().get("detail", response.text[:100])
+            except Exception:
+                error_detail = response.text[:100] if response.text else ""
+            return False, f"HTTP {response.status_code}: {error_detail}".strip()
+        except requests.Timeout:
+            return False, "Request timed out"
+        except requests.ConnectionError:
+            return False, "Connection failed"
+        except requests.RequestException as e:
+            return False, str(e)
 
     def test_connection(self) -> tuple[bool, Optional[str]]:
         """

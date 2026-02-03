@@ -45,11 +45,12 @@ def main():
 
             if snapshot:
                 # Upload to Prusa Connect
-                if uploader.upload(snapshot):
+                success, error = uploader.upload(snapshot)
+                if success:
                     consecutive_failures = 0
                 else:
                     consecutive_failures += 1
-                    print(f"Upload failed ({consecutive_failures}/{max_failures})")
+                    print(f"Upload failed ({consecutive_failures}/{max_failures}): {error}")
             else:
                 consecutive_failures += 1
                 print(f"Capture failed ({consecutive_failures}/{max_failures})")
