@@ -1,0 +1,302 @@
+"""Video processor for creating timelapse videos from captured frames."""
+
+import os
+import sys
+import time
+import signal
+import subprocess
+from pathlib import Path
+from datetime import datetime
+from typing import Optional, List
+
+from .config import Config
+
+
+class VideoProcessor:
+    """Creates timelapse videos from captured frames using FFmpeg."""
+
+    READY_MARKER = "ready_for_video"
+    PROCESSING_MARKER = ".processing_video"
+    COMPLETE_MARKER = "video_complete"
+    LOG_FILE = "video_creation.log"
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.storage_path = Path(config.nas_mount_point)
+        self._should_stop = False
+
+    def _log(self, session_path: Path, message: str):
+        """Write message to session log file."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_line = f"[{timestamp}] {message}\n"
+        try:
+            log_file = session_path / self.LOG_FILE
+            with open(log_file, "a") as f:
+                f.write(log_line)
+        except Exception as e:
+            print(f"Warning: Could not write to log: {e}")
+        print(message)
+
+    def _get_rotation_filter(self) -> str:
+        """Get FFmpeg video filter for rotation."""
+        rotation = self.config.video_rotation
+        if rotation == 90:
+            return "transpose=1"
+        elif rotation == 180:
+            return "transpose=1,transpose=1"
+        elif rotation == 270:
+            return "transpose=2"
+        return ""
+
+    def _create_frame_list(self, session_path: Path) -> Optional[Path]:
+        """Create a file list for FFmpeg concat demuxer."""
+        frames_dir = session_path / "frames"
+        if not frames_dir.exists():
+            return None
+
+        frames = sorted(frames_dir.glob("frame_*.jpg"))
+        if not frames:
+            return None
+
+        filelist = session_path / "filelist.txt"
+
+        main_fps = self.config.video_frame_rate
+        slow_frames = self.config.slow_motion_frames
+        slow_fps = self.config.slow_motion_fps
+
+        with open(filelist, "w") as f:
+            total_frames = len(frames)
+            slow_start = total_frames - slow_frames if slow_frames > 0 else total_frames
+
+            for i, frame in enumerate(frames):
+                f.write(f"file '{frame.resolve()}'\n")
+                if i < slow_start:
+                    duration = 1.0 / main_fps
+                else:
+                    duration = 1.0 / slow_fps
+                f.write(f"duration {duration:.6f}\n")
+
+            if frames:
+                f.write(f"file '{frames[-1].resolve()}'\n")
+
+        return filelist
+
+    def _run_ffmpeg(self, session_path: Path, filelist: Path, output_path: Path) -> bool:
+        """Run FFmpeg to create video. Returns True on success."""
+        vf_parts = []
+
+        rotation_filter = self._get_rotation_filter()
+        if rotation_filter:
+            vf_parts.append(rotation_filter)
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(filelist),
+        ]
+
+        if vf_parts:
+            cmd.extend(["-vf", ",".join(vf_parts)])
+
+        cmd.extend([
+            "-c:v", "libx264",
+            "-crf", str(self.config.video_crf),
+            "-preset", self.config.video_preset,
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+
+        self._log(session_path, f"Running: {' '.join(cmd)}")
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+            timeout = 3600
+            start_time = time.time()
+
+            while process.poll() is None:
+                if time.time() - start_time > timeout:
+                    self._log(session_path, "ERROR: FFmpeg timeout (1 hour)")
+                    process.kill()
+                    return False
+                time.sleep(1)
+
+            if process.returncode == 0:
+                return True
+            else:
+                output = process.stdout.read() if process.stdout else ""
+                self._log(session_path, f"ERROR: FFmpeg failed (code {process.returncode})")
+                if output:
+                    self._log(session_path, f"FFmpeg output: {output[:1000]}")
+                return False
+
+        except Exception as e:
+            self._log(session_path, f"ERROR: FFmpeg exception: {e}")
+            return False
+
+    def process_session(self, session_path: Path) -> bool:
+        """Process a single session to create video. Returns True on success."""
+        session_name = session_path.name
+
+        ready_marker = session_path / self.READY_MARKER
+        processing_marker = session_path / self.PROCESSING_MARKER
+        complete_marker = session_path / self.COMPLETE_MARKER
+
+        if not ready_marker.exists():
+            return False
+
+        if processing_marker.exists():
+            self._log(session_path, f"Session {session_name} already being processed")
+            return False
+
+        if complete_marker.exists():
+            self._log(session_path, f"Session {session_name} already completed")
+            ready_marker.unlink(missing_ok=True)
+            return True
+
+        self._log(session_path, f"Starting video processing for: {session_name}")
+
+        try:
+            processing_marker.touch()
+        except Exception as e:
+            self._log(session_path, f"ERROR: Could not create processing marker: {e}")
+            return False
+
+        try:
+            filelist = self._create_frame_list(session_path)
+            if not filelist:
+                self._log(session_path, "ERROR: No frames found in session")
+                processing_marker.unlink(missing_ok=True)
+                return False
+
+            frames_dir = session_path / "frames"
+            frame_count = len(list(frames_dir.glob("frame_*.jpg")))
+            self._log(session_path, f"Found {frame_count} frames")
+
+            output_path = session_path / f"{session_name}.mp4"
+
+            success = self._run_ffmpeg(session_path, filelist, output_path)
+
+            filelist.unlink(missing_ok=True)
+
+            if success:
+                complete_marker.touch()
+                ready_marker.unlink(missing_ok=True)
+                processing_marker.unlink(missing_ok=True)
+
+                if output_path.exists():
+                    size_mb = output_path.stat().st_size / (1024 * 1024)
+                    self._log(session_path, f"SUCCESS: Video created: {output_path.name} ({size_mb:.1f} MB)")
+                return True
+            else:
+                processing_marker.unlink(missing_ok=True)
+                return False
+
+        except Exception as e:
+            self._log(session_path, f"ERROR: Processing failed: {e}")
+            processing_marker.unlink(missing_ok=True)
+            return False
+
+    def find_pending_sessions(self) -> List[Path]:
+        """Find all sessions with ready_for_video marker."""
+        if not self.storage_path.exists():
+            return []
+
+        pending = []
+        try:
+            for session_dir in self.storage_path.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                ready_marker = session_dir / self.READY_MARKER
+                complete_marker = session_dir / self.COMPLETE_MARKER
+                processing_marker = session_dir / self.PROCESSING_MARKER
+
+                if ready_marker.exists() and not complete_marker.exists() and not processing_marker.exists():
+                    pending.append(session_dir)
+        except Exception as e:
+            print(f"Error scanning for sessions: {e}")
+
+        return sorted(pending, key=lambda p: p.name)
+
+    def run_monitor(self, check_interval: int = 60):
+        """Run the video processor monitor loop."""
+        print("=== Prusa Video Processor ===")
+        print(f"Storage: {self.storage_path}")
+        print(f"Video settings:")
+        print(f"  Enabled: {self.config.video_enabled}")
+        print(f"  Frame rate: {self.config.video_frame_rate} FPS")
+        print(f"  Rotation: {self.config.video_rotation} degrees")
+        print(f"  Quality (CRF): {self.config.video_crf}")
+        print(f"  Preset: {self.config.video_preset}")
+        print(f"  Slow-motion: last {self.config.slow_motion_frames} frames @ {self.config.slow_motion_fps} FPS")
+        print()
+        print(f"Checking for completed sessions every {check_interval}s")
+        print()
+
+        if not self.config.video_enabled:
+            print("Video processing is disabled in configuration.")
+            print("Enable it by setting video.enabled = true in ~/.prusa_camera_config")
+            while not self._should_stop:
+                time.sleep(check_interval)
+            return
+
+        def handle_signal(signum, frame):
+            print("\nReceived shutdown signal...")
+            self._should_stop = True
+
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+
+        while not self._should_stop:
+            try:
+                pending = self.find_pending_sessions()
+
+                if pending:
+                    print(f"Found {len(pending)} session(s) ready for processing")
+                    for session_path in pending:
+                        if self._should_stop:
+                            break
+                        self.process_session(session_path)
+                else:
+                    print("Waiting for sessions...", end="\r", flush=True)
+
+                for _ in range(check_interval):
+                    if self._should_stop:
+                        break
+                    time.sleep(1)
+
+            except KeyboardInterrupt:
+                print("\n\nStopping video processor...")
+                break
+            except Exception as e:
+                print(f"\nError in monitor loop: {e}")
+                time.sleep(60)
+
+        print("Video processor stopped.")
+
+
+def main():
+    """Entry point for video processor."""
+    config = Config()
+    if not config.load():
+        print("Configuration not found. Run setup.py first.")
+        sys.exit(1)
+
+    if not config.is_configured():
+        print("Configuration incomplete. Run setup.py first.")
+        sys.exit(1)
+
+    processor = VideoProcessor(config)
+    processor.run_monitor()
+
+
+if __name__ == "__main__":
+    main()

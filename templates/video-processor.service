@@ -1,0 +1,19 @@
+[Unit]
+Description=Prusa Timelapse Video Processor
+After=network-online.target timelapse-monitor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u -m src.video_processor
+WorkingDirectory={{INSTALL_DIR}}
+Restart=always
+RestartSec=60
+User={{USER}}
+MemoryMax=256M
+CPUQuota=80%
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

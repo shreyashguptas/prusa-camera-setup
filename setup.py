@@ -232,6 +232,7 @@ def check_prerequisites() -> bool:
     checks = [
         ("camera_auto_detect=1", check_camera_config(), None, None, None),
         ("rpicam-still", shutil.which("rpicam-still") is not None, "rpicam-apps", None, None),
+        ("ffmpeg", shutil.which("ffmpeg") is not None, "ffmpeg", None, None),
         ("TailScale", shutil.which("tailscale") is not None, None, None, "curl -fsSL https://tailscale.com/install.sh | sh"),
         ("cifs-utils", Path("/sbin/mount.cifs").exists(), "cifs-utils", None, None),
         ("smbclient", shutil.which("smbclient") is not None, "smbclient", None, None),
@@ -598,6 +599,83 @@ def setup_camera_settings(config: Config) -> bool:
     return True
 
 
+def setup_video_settings(config: Config) -> bool:
+    """Configure automatic video creation settings."""
+    print_header("Video Creation Settings")
+
+    # Check FFmpeg is installed
+    if not shutil.which("ffmpeg"):
+        print("FFmpeg is not installed. Video creation will not work.")
+        print("Install with: sudo apt install -y ffmpeg")
+        if not confirm("Continue anyway?", default=False):
+            return False
+
+    print("Configure automatic timelapse video creation.")
+    print("Videos are created after each print completes.")
+    print()
+
+    # Enable/disable toggle
+    current_enabled = config.video_enabled
+    default_str = "yes" if current_enabled else "no"
+    enabled = confirm("Enable automatic video creation?", default=current_enabled)
+    config.set("video", "enabled", "true" if enabled else "false")
+
+    if not enabled:
+        print("Video creation disabled.")
+        return True
+
+    # Frame rate
+    current = config.video_frame_rate
+    print()
+    print("Frame rate determines video playback speed.")
+    print("Higher = faster playthrough, lower = slower.")
+    frame_rate = prompt_int("Video frame rate (1-60 FPS)", current)
+    frame_rate = max(1, min(frame_rate, 60))
+    config.set("video", "frame_rate", str(frame_rate))
+
+    # Rotation
+    print()
+    print("Camera rotation to apply to video:")
+    print("  0   - No rotation")
+    print("  90  - Rotate 90 degrees clockwise")
+    print("  180 - Rotate 180 degrees (upside down correction)")
+    print("  270 - Rotate 270 degrees clockwise")
+    current = config.video_rotation
+    while True:
+        rotation = prompt_int("Rotation degrees", current)
+        if rotation in (0, 90, 180, 270):
+            break
+        print("Please enter 0, 90, 180, or 270")
+    config.set("video", "rotation", str(rotation))
+
+    # Advanced settings
+    if confirm("\nConfigure advanced video settings?", default=False):
+        # CRF (quality)
+        print()
+        print("CRF (Constant Rate Factor) controls quality:")
+        print("  0 = Lossless, 18 = High quality, 23 = Default, 28 = Low quality")
+        print("  Lower = better quality but larger files")
+        current = config.video_crf
+        crf = prompt_int("CRF value (0-51)", current)
+        crf = max(0, min(crf, 51))
+        config.set("video", "crf", str(crf))
+
+        # Slow-motion ending
+        print()
+        print("Slow-motion ending shows final frames at slower speed.")
+        print("Set to 0 to disable slow-motion effect.")
+        current = config.slow_motion_frames
+        slow_frames = prompt_int("Number of frames to slow down", current)
+        config.set("video", "slow_motion_frames", str(max(0, slow_frames)))
+
+        if slow_frames > 0:
+            current = config.slow_motion_fps
+            slow_fps = prompt_int("Slow-motion FPS", current)
+            config.set("video", "slow_motion_fps", str(max(1, slow_fps)))
+
+    return True
+
+
 def install_services(config: Config) -> bool:
     """Install systemd services."""
     print_header("Installing Services")
@@ -611,6 +689,7 @@ def install_services(config: Config) -> bool:
     services = [
         ("prusacam.service", "Camera upload service"),
         ("timelapse-monitor.service", "Timelapse monitor service"),
+        ("video-processor.service", "Video processor service"),
     ]
 
     for service_file, description in services:
@@ -667,6 +746,10 @@ def install_services(config: Config) -> bool:
         ["sudo", "systemctl", "enable", "timelapse-monitor.service"],
         capture_output=True,
     )
+    subprocess.run(
+        ["sudo", "systemctl", "enable", "video-processor.service"],
+        capture_output=True,
+    )
 
     # Mount NAS if not already mounted
     if not nas.is_mounted():
@@ -687,6 +770,10 @@ def install_services(config: Config) -> bool:
         ["sudo", "systemctl", "restart", "timelapse-monitor.service"],
         capture_output=True,
     )
+    subprocess.run(
+        ["sudo", "systemctl", "restart", "video-processor.service"],
+        capture_output=True,
+    )
 
     print()
     print("Services installed and started!")
@@ -694,6 +781,7 @@ def install_services(config: Config) -> bool:
     print("Check status with:")
     print("  systemctl status prusacam")
     print("  systemctl status timelapse-monitor")
+    print("  systemctl status video-processor")
     print()
 
     return True
@@ -739,6 +827,10 @@ def main():
     if confirm("Configure advanced camera settings?", default=False):
         setup_camera_settings(config)
 
+    # Step 5: Video Settings
+    if confirm("Configure video creation settings?", default=True):
+        setup_video_settings(config)
+
     # Save final config
     config.save()
     print("Configuration saved to ~/.prusa_camera_config")
@@ -756,10 +848,14 @@ def main():
     print("  1. Camera uploads snapshots to Prusa Connect every",
           f"{config.upload_interval}s")
     print("  2. When you start a print, timelapse frames are captured automatically")
-    print("  3. Frames are saved to NAS as JPEGs for external processing")
+    print("  3. Frames are saved to NAS as JPEGs")
+    if config.video_enabled:
+        print("  4. After print completes, an MP4 video is created automatically")
     print()
-    print("Frames will be saved to:")
-    print(f"  {config.nas_mount_point}/<session>/frames/")
+    print("Files will be saved to:")
+    print(f"  {config.nas_mount_point}/<session>/frames/  (JPEG frames)")
+    if config.video_enabled:
+        print(f"  {config.nas_mount_point}/<session>/<session>.mp4  (video)")
     print()
     print("Manual timelapse control:")
     print("  Start: echo 'my_print' > ~/.timelapse_recording")
@@ -768,6 +864,7 @@ def main():
     print("View logs:")
     print("  journalctl -u prusacam -f")
     print("  journalctl -u timelapse-monitor -f")
+    print("  journalctl -u video-processor -f")
     print()
 
 

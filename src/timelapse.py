@@ -112,6 +112,16 @@ class TimelapseManager:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
 
+    def _signal_session_complete(self, session_name: str):
+        """Signal that session is ready for video processing."""
+        session_path = self.storage_path / session_name
+        ready_marker = session_path / "ready_for_video"
+        try:
+            ready_marker.touch()
+            print(f"Session ready for video: {session_name}")
+        except Exception as e:
+            print(f"Warning: Could not create ready marker: {e}")
+
     def capture_frame(self, session_name: str, frame_number: int) -> bool:
         """
         Capture a frame for the timelapse.
@@ -271,6 +281,7 @@ class TimelapseManager:
                         if total > 0:
                             rate = capture_success / total * 100
                             print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
+                        self._signal_session_complete(current_session)
                         current_session = None
                         current_job_id = None
                         frame_count = 0
@@ -309,6 +320,7 @@ class TimelapseManager:
                             if post_print_failed_attempts >= POST_PRINT_MAX_FAILURES:
                                 print(f"\nPost-print capture aborted: {POST_PRINT_MAX_FAILURES} consecutive failures")
                                 print(f"Session stopped: {current_session} ({post_print_frames_captured}/{self.config.post_print_frames} post-print frames)")
+                                self._signal_session_complete(current_session)
                                 current_session = None
                                 current_job_id = None
                                 frame_count = 0
@@ -328,6 +340,7 @@ class TimelapseManager:
                             if total > 0:
                                 rate = capture_success / total * 100
                                 print(f"Session capture rate: {rate:.1f}% ({capture_success}/{total})")
+                            self._signal_session_complete(current_session)
                             current_session = None
                             current_job_id = None
                             frame_count = 0

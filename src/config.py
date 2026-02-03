@@ -37,6 +37,15 @@ class Config:
             "quality": "85",
             "upload_interval": "12",
         },
+        "video": {
+            "enabled": "true",
+            "frame_rate": "15",
+            "rotation": "180",
+            "crf": "18",
+            "preset": "veryfast",
+            "slow_motion_frames": "5",
+            "slow_motion_fps": "2",
+        },
     }
 
     def __init__(self, config_path: Optional[Path] = None):
@@ -150,6 +159,41 @@ class Config:
     @property
     def upload_interval(self) -> int:
         return self.get_int("camera", "upload_interval", 12)
+
+    @property
+    def video_enabled(self) -> bool:
+        return self.get("video", "enabled", "true").lower() == "true"
+
+    @property
+    def video_frame_rate(self) -> int:
+        rate = self.get_int("video", "frame_rate", 15)
+        return max(1, min(rate, 60))
+
+    @property
+    def video_rotation(self) -> int:
+        rotation = self.get_int("video", "rotation", 180)
+        if rotation not in (0, 90, 180, 270):
+            return 180
+        return rotation
+
+    @property
+    def video_crf(self) -> int:
+        crf = self.get_int("video", "crf", 18)
+        return max(0, min(crf, 51))
+
+    @property
+    def video_preset(self) -> str:
+        preset = self.get("video", "preset", "veryfast")
+        valid = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
+        return preset if preset in valid else "veryfast"
+
+    @property
+    def slow_motion_frames(self) -> int:
+        return max(0, self.get_int("video", "slow_motion_frames", 5))
+
+    @property
+    def slow_motion_fps(self) -> int:
+        return max(1, self.get_int("video", "slow_motion_fps", 2))
 
     def is_configured(self) -> bool:
         """Check if essential configuration is present."""
