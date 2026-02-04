@@ -1,11 +1,12 @@
-# Prusa Connect App and Timelapse Frame Capture
+# Prusa Connect Camera + Automatic Timelapse Videos
 
-**Live camera feed in the Prusa app + automatic timelapse frames saved to your NAS.**
+**Live camera feed in the Prusa app + automatic timelapse videos saved to your NAS.**
 
-A plug-and-play Raspberry Pi camera system for Prusa 3D printers that does two things:
+A plug-and-play Raspberry Pi camera system for Prusa 3D printers that does three things:
 
 1. **📱 Remote Monitoring** — Stream your print to the Prusa Connect app so you can check on it from anywhere
-2. **🎬 Automatic Timelapse Frames** — Frame capture starts when you print, stops when done, and saves JPEGs to your NAS for external video processing
+2. **🎬 Automatic Frame Capture** — Recording starts when you print, stops when done, saves frames to your NAS
+3. **🎥 Automatic Video Creation** — Frames are automatically rendered into MP4 timelapse videos
 
 ---
 
@@ -16,13 +17,19 @@ A plug-and-play Raspberry Pi camera system for Prusa 3D printers that does two t
 
 ---
 
-## Creating Timelapse Videos
+## Automatic Video Creation
 
-This system captures frames only. To create timelapse videos from your captured frames, use the companion app:
+When a print finishes, the video processor automatically:
 
-**[Timelapse Creator](https://github.com/shreyashguptas/timelapse-creator)** - A desktop app to turn your captured frames into timelapse videos.
+1. Detects the completed session on your NAS
+2. Renders frames into an MP4 timelapse video
+3. Saves the video alongside the frames folder
 
-Simply point it at your NAS folder containing the frames, and it will generate a video file for you.
+**Output:** High-quality H.264 video at 10 FPS (configurable), perfect for YouTube uploads.
+
+**Recovery:** If encoding is interrupted (power loss, etc.), the system automatically detects and retries on next startup.
+
+**Resource Usage:** Optimized for Raspberry Pi Zero 2W (512MB RAM) — video encoding runs at low priority so it doesn't interfere with frame capture or Prusa Connect uploads.
 
 ---
 
@@ -168,16 +175,70 @@ mount_point = /mnt/nas/printer-footage
 username = your_smb_user
 
 [timelapse]
-capture_interval = 30    # Seconds between frames
+capture_interval = 30    # Seconds between frames during print
+finishing_threshold = 98 # Start fast capture at this % complete
+finishing_interval = 5   # Seconds between frames when finishing
+post_print_frames = 24   # Extra frames after print completes
+post_print_interval = 5  # Seconds between post-print frames
 
 [camera]
 width = 1704
 height = 1278
-quality = 85             # JPEG quality
+quality = 85             # JPEG quality (1-100)
 upload_interval = 12     # Seconds between Prusa Connect uploads
+
+[video]
+enabled = true           # Enable automatic video creation
+frame_rate = 10          # Output video FPS
+rotation = 180           # Rotate video (0, 90, 180, 270)
+crf = 18                 # Quality (0=lossless, 18=high, 28=low)
+preset = veryfast        # Encoding speed (ultrafast to veryslow)
 ```
 
 To change settings, either edit this file or run `python3 setup.py` again.
+
+---
+
+## Services
+
+Three systemd services run on your Raspberry Pi:
+
+| Service | Purpose |
+|---------|---------|
+| `prusacam.service` | Uploads camera snapshots to Prusa Connect for remote monitoring |
+| `timelapse-monitor.service` | Captures frames during prints, saves to NAS |
+| `video-processor.service` | Renders completed frame sessions into MP4 videos |
+
+### Managing Services
+
+```bash
+# Check status of all services
+sudo systemctl status prusacam timelapse-monitor video-processor
+
+# Restart a service
+sudo systemctl restart video-processor
+
+# View logs
+journalctl -u video-processor -f
+```
+
+---
+
+## Output Structure
+
+Each print session creates a folder on your NAS:
+
+```
+/mnt/nas/printer-footage/
+└── print_20260203_151949/
+    ├── frames/
+    │   ├── frame_000000.jpg
+    │   ├── frame_000001.jpg
+    │   └── ...
+    ├── print_20260203_151949.mp4    # Final timelapse video
+    ├── video_creation.log           # Encoding log
+    └── video_complete               # Marker file (encoding done)
+```
 
 ---
 
