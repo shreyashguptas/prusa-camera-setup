@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from .config import Config
+from .nas import NASMount
 
 
 class VideoProcessor:
@@ -24,6 +25,12 @@ class VideoProcessor:
         self.config = config
         self.storage_path = Path(config.nas_mount_point)
         self._should_stop = False
+        self.nas = NASMount(
+            nas_ip=config.nas_ip,
+            share_path=config.nas_share,
+            mount_point=config.nas_mount_point,
+            username=config.nas_username,
+        )
 
     def _check_nas_health(self, timeout: int = 5) -> bool:
         """Quick write test to verify NAS is responsive."""
@@ -219,6 +226,10 @@ class VideoProcessor:
                 processing_marker.unlink(missing_ok=True)
                 return False
 
+        except OSError as e:
+            self._log(session_path, f"ERROR: NAS error during processing: {e}")
+            processing_marker.unlink(missing_ok=True)
+            raise  # Propagate to monitor loop for NAS recovery
         except Exception as e:
             self._log(session_path, f"ERROR: Processing failed: {e}")
             processing_marker.unlink(missing_ok=True)
@@ -226,7 +237,10 @@ class VideoProcessor:
 
     def find_pending_sessions(self) -> List[Path]:
         """Find all sessions with ready_for_video marker."""
-        if not self.storage_path.exists():
+        try:
+            if not self.storage_path.exists():
+                return []
+        except OSError:
             return []
 
         pending = []
@@ -240,6 +254,9 @@ class VideoProcessor:
 
                 if ready_marker.exists() and not complete_marker.exists() and not processing_marker.exists():
                     pending.append(session_dir)
+        except OSError as e:
+            print(f"NAS unavailable while scanning sessions: {e}")
+            return []
         except Exception as e:
             print(f"Error scanning for sessions: {e}")
 
@@ -247,7 +264,11 @@ class VideoProcessor:
 
     def _recover_stale_sessions(self, max_age_hours: int = 2):
         """Recover sessions stuck in processing state."""
-        if not self.storage_path.exists():
+        try:
+            if not self.storage_path.exists():
+                return
+        except OSError:
+            print("NAS unavailable during recovery scan — skipping")
             return
 
         now = time.time()
@@ -295,6 +316,8 @@ class VideoProcessor:
                     except Exception as e:
                         print(f"  Warning: Could not create ready marker: {e}")
 
+        except OSError as e:
+            print(f"NAS unavailable during recovery scan: {e}")
         except Exception as e:
             print(f"Error during recovery scan: {e}")
 
@@ -326,12 +349,37 @@ class VideoProcessor:
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
 
-        # Recover any stale sessions before starting
-        self._recover_stale_sessions()
+        # Check NAS availability before starting
+        nas_was_unavailable = False
+        if self.nas.ensure_mounted():
+            self._recover_stale_sessions()
+        else:
+            print("NAS unavailable at startup — will retry periodically")
+            nas_was_unavailable = True
         print()
 
         while not self._should_stop:
             try:
+                # Check NAS health, attempt remount if stale
+                if not self.nas.is_healthy():
+                    if not nas_was_unavailable:
+                        print("NAS became unavailable — attempting remount...")
+                        nas_was_unavailable = True
+                    self.nas.try_remount()
+                    if not self.nas.is_healthy():
+                        # Still unavailable, wait and retry
+                        for _ in range(check_interval):
+                            if self._should_stop:
+                                break
+                            time.sleep(1)
+                        continue
+
+                # NAS just came back
+                if nas_was_unavailable:
+                    print("NAS is back online")
+                    nas_was_unavailable = False
+                    self._recover_stale_sessions()
+
                 pending = self.find_pending_sessions()
 
                 if pending:
@@ -355,6 +403,10 @@ class VideoProcessor:
             except KeyboardInterrupt:
                 print("\n\nStopping video processor...")
                 break
+            except OSError as e:
+                print(f"\nNAS error: {e}")
+                nas_was_unavailable = True
+                time.sleep(check_interval)
             except Exception as e:
                 print(f"\nError in monitor loop: {e}")
                 time.sleep(60)
