@@ -207,6 +207,176 @@ def confirm(text: str, default: bool = True) -> bool:
     return result in ("y", "yes")
 
 
+def find_config_txt() -> Optional[Path]:
+    """Find the boot config.txt file."""
+    for path in [Path("/boot/firmware/config.txt"), Path("/boot/config.txt")]:
+        if path.exists():
+            return path
+    return None
+
+
+def optimize_memory() -> bool:
+    """Optimize memory for Pi Zero 2W: reduce CMA, GPU mem, disable unused hardware/services."""
+    print_header("Memory Optimization (Pi Zero 2W)")
+
+    print("The Pi Zero 2W has only 512MB RAM (416MB usable).")
+    print("Default settings waste ~250MB on unused features.")
+    print()
+    print("This step will:")
+    print("  - Reduce CMA reservation from 256MB to 64MB")
+    print("  - Reduce GPU memory from 64MB to 32MB")
+    print("  - Disable audio, Bluetooth, and framebuffers")
+    print("  - Disable ModemManager and polkit services")
+    print()
+
+    if not confirm("Apply memory optimizations?", default=True):
+        print("Skipping memory optimization.")
+        return True
+
+    config_path = find_config_txt()
+    if not config_path:
+        print("Could not find /boot/firmware/config.txt")
+        return confirm("Continue anyway?", default=True)
+
+    try:
+        content = config_path.read_text()
+    except PermissionError:
+        result = subprocess.run(
+            ["sudo", "cat", str(config_path)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"  Failed to read {config_path}")
+            return confirm("Continue anyway?", default=True)
+        content = result.stdout
+
+    changes = []
+
+    # 1. Reduce CMA to 64MB
+    if "dtoverlay=vc4-kms-v3d,cma-" in content:
+        print("  [OK] CMA already configured")
+    elif "dtoverlay=vc4-kms-v3d" in content:
+        content = content.replace(
+            "dtoverlay=vc4-kms-v3d",
+            "dtoverlay=vc4-kms-v3d,cma-64",
+        )
+        changes.append("CMA reduced to 64MB")
+    else:
+        print("  [SKIP] vc4-kms-v3d overlay not found")
+
+    # 2. Set gpu_mem=32
+    if "gpu_mem=" in content:
+        print("  [OK] gpu_mem already configured")
+    else:
+        # Add after [all] section if it exists, otherwise append
+        if "[all]" in content:
+            content = content.replace("[all]", "[all]\ngpu_mem=32", 1)
+        else:
+            content += "\ngpu_mem=32\n"
+        changes.append("GPU memory set to 32MB")
+
+    # 3. Disable audio
+    if "dtparam=audio=off" in content:
+        print("  [OK] Audio already disabled")
+    elif "dtparam=audio=on" in content:
+        content = content.replace("dtparam=audio=on", "dtparam=audio=off")
+        changes.append("Audio disabled")
+
+    # 4. Set max_framebuffers=0
+    if "max_framebuffers=0" in content:
+        print("  [OK] Framebuffers already disabled")
+    elif "max_framebuffers=" in content:
+        # Replace any existing value
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip().startswith("max_framebuffers="):
+                lines[i] = "max_framebuffers=0"
+                break
+        content = "\n".join(lines)
+        changes.append("Framebuffers disabled")
+
+    # 5. Disable Bluetooth
+    if "dtoverlay=disable-bt" in content:
+        print("  [OK] Bluetooth already disabled")
+    else:
+        content += "\ndtoverlay=disable-bt\n"
+        changes.append("Bluetooth disabled")
+
+    # Write config if changed
+    if changes:
+        print()
+        for change in changes:
+            print(f"  [APPLY] {change}")
+
+        # Backup and write
+        backup_path = str(config_path) + ".bak"
+        result = subprocess.run(
+            ["sudo", "cp", str(config_path), backup_path],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            print(f"  Backup saved to {backup_path}")
+
+        # Write via temp file + sudo mv
+        temp_path = Path("/tmp/config.txt.setup")
+        temp_path.write_text(content)
+        result = subprocess.run(
+            ["sudo", "cp", str(temp_path), str(config_path)],
+            capture_output=True,
+        )
+        temp_path.unlink(missing_ok=True)
+
+        if result.returncode != 0:
+            print("  Failed to write config.txt (needs sudo)")
+            return confirm("Continue anyway?", default=True)
+
+        print("  Config saved!")
+    else:
+        print()
+        print("  Config already optimized, no changes needed.")
+
+    # 6. Disable unnecessary services
+    print()
+    print("Disabling unnecessary services...")
+
+    for service in ["ModemManager", "polkit"]:
+        # Check if service exists
+        check = subprocess.run(
+            ["systemctl", "list-unit-files", f"{service}.service"],
+            capture_output=True, text=True,
+        )
+        if service not in check.stdout:
+            print(f"  [SKIP] {service} not installed")
+            continue
+
+        # Check if already masked
+        status = subprocess.run(
+            ["systemctl", "is-enabled", f"{service}.service"],
+            capture_output=True, text=True,
+        )
+        if "masked" in status.stdout:
+            print(f"  [OK] {service} already disabled")
+            continue
+
+        subprocess.run(
+            ["sudo", "systemctl", "disable", "--now", f"{service}.service"],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["sudo", "systemctl", "mask", f"{service}.service"],
+            capture_output=True,
+        )
+        print(f"  [APPLY] {service} disabled and masked")
+
+    print()
+    if changes:
+        print("NOTE: Boot config changes take effect after reboot.")
+        print("      A reboot will be needed after setup completes.")
+
+    print()
+    return True
+
+
 def check_camera_config() -> bool:
     """Check if camera_auto_detect=1 is in config.txt."""
     for config_path in [Path("/boot/firmware/config.txt"), Path("/boot/config.txt")]:
@@ -793,7 +963,12 @@ def main():
         print("Setup cancelled.")
         sys.exit(1)
 
-    # Step 2: Prusa Connect
+    # Step 2: Memory Optimization
+    if not optimize_memory():
+        print("Setup cancelled.")
+        sys.exit(1)
+
+    # Step 3: Prusa Connect
     if not setup_prusa_connect(config):
         print("Setup cancelled.")
         sys.exit(1)
@@ -802,7 +977,7 @@ def main():
     config.save()
     print("Configuration saved.")
 
-    # Step 3: NAS Storage
+    # Step 4: NAS Storage
     if not setup_nas(config):
         print("Setup cancelled.")
         sys.exit(1)
@@ -810,11 +985,11 @@ def main():
     # Save config after NAS setup
     config.save()
 
-    # Step 4: Camera Settings (optional)
+    # Step 5: Camera Settings (optional)
     if confirm("Configure advanced camera settings?", default=False):
         setup_camera_settings(config)
 
-    # Step 5: Video Settings
+    # Step 6: Video Settings
     if confirm("Configure video creation settings?", default=True):
         setup_video_settings(config)
 
@@ -822,7 +997,7 @@ def main():
     config.save()
     print("Configuration saved to ~/.prusa_camera_config")
 
-    # Step 6: Install Services
+    # Step 7: Install Services
     if confirm("Install and start systemd services?", default=True):
         if not install_services(config):
             print("Service installation had issues. Check manually.")
