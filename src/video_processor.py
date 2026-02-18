@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+import shutil
 import signal
 import subprocess
 from pathlib import Path
@@ -99,9 +100,14 @@ class VideoProcessor:
         return ""
 
     def _run_ffmpeg(self, session_path: Path, output_path: Path) -> bool:
-        """Run FFmpeg using image sequence input. Returns True on success."""
+        """Run FFmpeg to local temp file, then copy to NAS. Returns True on success."""
         frames_dir = session_path / "frames"
         frame_pattern = str(frames_dir / "frame_%06d.jpg")
+
+        # Use SD card for temp storage (NOT /tmp which is RAM-backed tmpfs)
+        local_tmp_dir = Path.home() / ".video_processing_tmp"
+        local_tmp_dir.mkdir(parents=True, exist_ok=True)
+        local_tmp_file = local_tmp_dir / output_path.name
 
         # Build video filter
         vf_parts = []
@@ -126,9 +132,10 @@ class VideoProcessor:
             "-pix_fmt", "yuv420p",
             "-threads", "2",
             "-movflags", "+faststart",
-            str(output_path),
+            str(local_tmp_file),
         ])
 
+        self._log(session_path, f"Encoding to local temp: {local_tmp_file}")
         self._log(session_path, f"Running: {' '.join(cmd)}")
 
         try:
@@ -149,21 +156,33 @@ class VideoProcessor:
                     return False
                 time.sleep(1)
 
-            if process.returncode == 0:
-                return True
-            elif process.returncode == -9:
+            if process.returncode == -9:
                 self._log(session_path, "ERROR: FFmpeg killed by signal 9 (likely out of memory)")
                 return False
-            else:
+            elif process.returncode != 0:
                 output = process.stdout.read() if process.stdout else ""
                 self._log(session_path, f"ERROR: FFmpeg failed (code {process.returncode})")
                 if output:
                     self._log(session_path, f"FFmpeg output: {output[:1000]}")
                 return False
 
+            # FFmpeg succeeded — copy finished file to NAS
+            local_size_mb = local_tmp_file.stat().st_size / (1024 * 1024)
+            self._log(session_path, f"Encoding complete ({local_size_mb:.1f} MB), copying to NAS...")
+            shutil.copy2(str(local_tmp_file), str(output_path))
+            self._log(session_path, f"Copied to NAS: {output_path}")
+            return True
+
         except Exception as e:
-            self._log(session_path, f"ERROR: FFmpeg exception: {e}")
+            self._log(session_path, f"ERROR: FFmpeg/copy exception: {e}")
             return False
+        finally:
+            # Clean up local temp file
+            if local_tmp_file.exists():
+                try:
+                    local_tmp_file.unlink()
+                except Exception:
+                    pass
 
     def process_session(self, session_path: Path) -> bool:
         """Process a single session to create video. Returns True on success."""
