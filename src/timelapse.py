@@ -80,16 +80,17 @@ class TimelapseManager:
         """
         session_name = name or self._get_session_name()
 
-        # Try to create session dir on NAS, fall back to local
-        try:
-            if self._nas_available:
-                session_dir = self.storage_path / session_name / "frames"
-                session_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                raise OSError("NAS unavailable")
-        except OSError:
-            local_dir = self.LOCAL_FALLBACK_DIR / session_name / "frames"
-            local_dir.mkdir(parents=True, exist_ok=True)
+        # Always create local session directory (primary storage)
+        local_dir = self.LOCAL_FALLBACK_DIR / session_name / "frames"
+        local_dir.mkdir(parents=True, exist_ok=True)
+
+        # Also create NAS directory if available (sync target)
+        if self._nas_available:
+            try:
+                nas_dir = self.storage_path / session_name / "frames"
+                nas_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass  # NAS unavailable, frames safe locally
 
         # Only write control file for manual sessions
         # Auto sessions rely on printer status - control file would cause infinite recording
@@ -147,31 +148,31 @@ class TimelapseManager:
 
     def _signal_session_complete(self, session_name: str):
         """Signal that session is ready for video processing."""
-        # Try NAS first, then local fallback
-        try:
-            if self._nas_available:
-                session_path = self.storage_path / session_name
-                ready_marker = session_path / "ready_for_video"
-                ready_marker.touch()
-                print(f"Session ready for video: {session_name}")
-                return
-        except OSError:
-            self._nas_available = False
-
-        # Mark locally — will be transferred with frames when NAS returns
+        # Always mark locally first (primary storage)
         try:
             local_session = self.LOCAL_FALLBACK_DIR / session_name
             if local_session.exists():
                 (local_session / "ready_for_video").touch()
-                print(f"Session marked for video (local): {session_name}")
         except Exception as e:
-            print(f"Warning: Could not create ready marker: {e}")
+            print(f"Warning: Could not create local ready marker: {e}")
 
-    def _transfer_local_frames_to_nas(self):
-        """Transfer any locally cached frames back to NAS.
+        # Also mark on NAS if available (sync target)
+        if self._nas_available:
+            try:
+                nas_session = self.storage_path / session_name
+                if nas_session.exists():
+                    (nas_session / "ready_for_video").touch()
+            except OSError:
+                pass  # NAS unavailable, marker safe locally
 
-        Called when NAS becomes available again. Transfers frames one at a
-        time with brief pauses to avoid overwhelming the Pi or NAS.
+        print(f"Session ready for video: {session_name}")
+
+    def _sync_frames_to_nas(self):
+        """Sync locally stored frames to NAS without deleting local copies.
+
+        Local copies are retained until the video processor confirms
+        the session is fully processed and synced to NAS. This ensures
+        zero data loss even if NAS goes down during or after sync.
         """
         if not self.LOCAL_FALLBACK_DIR.exists():
             return
@@ -184,92 +185,65 @@ class TimelapseManager:
         if not sessions:
             return
 
-        total_frames = 0
+        total_synced = 0
         for session_dir in sessions:
             frames_dir = session_dir / "frames"
             if not frames_dir.exists():
                 continue
             frames = sorted(frames_dir.glob("frame_*.jpg"))
             if not frames:
-                # Empty session, clean up
-                try:
-                    shutil.rmtree(session_dir)
-                except Exception:
-                    pass
                 continue
 
             session_name = session_dir.name
             nas_frames_dir = self.storage_path / session_name / "frames"
 
-            print(f"Transferring {len(frames)} local frames to NAS: {session_name}")
-
             try:
                 nas_frames_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
-                print(f"NAS unavailable during transfer — will retry later")
+                print(f"NAS unavailable during sync — will retry later")
                 self._nas_available = False
                 return
 
-            transferred = 0
+            synced = 0
             for frame in frames:
                 nas_frame = nas_frames_dir / frame.name
+                # Skip frames already on NAS
                 try:
-                    if not self._copy_with_timeout(frame, nas_frame, timeout=30):
-                        print(f"Transfer stalled at frame {transferred} — will retry later")
-                        return
-                    frame.unlink()
-                    transferred += 1
-                    total_frames += 1
-                    # Brief pause between frames to avoid overwhelming
-                    time.sleep(0.1)
+                    if nas_frame.exists():
+                        continue
                 except OSError:
-                    print(f"NAS became unavailable during transfer — will retry later")
                     self._nas_available = False
                     return
-                except Exception as e:
-                    print(f"Transfer error for {frame.name}: {e}")
-                    continue
 
-            # Transfer ready_for_video marker if it exists
+                if not self._copy_with_timeout(frame, nas_frame, timeout=30):
+                    print(f"NAS sync stalled at {synced} frames — will retry later")
+                    return
+
+                synced += 1
+                total_synced += 1
+                time.sleep(0.05)
+
+            if synced > 0:
+                print(f"Synced {synced} frames to NAS: {session_name}")
+
+            # Sync ready_for_video marker if it exists locally
             ready_marker = session_dir / "ready_for_video"
-            marker_transferred = True
             if ready_marker.exists():
                 try:
                     nas_session = self.storage_path / session_name
                     (nas_session / "ready_for_video").touch()
                 except OSError:
-                    print(f"Could not create ready marker on NAS for {session_name} — keeping local copy")
-                    marker_transferred = False
-
-            # Clean up local session only if everything transferred successfully
-            if marker_transferred:
-                try:
-                    shutil.rmtree(session_dir)
-                    print(f"Transferred {transferred} frames for {session_name}")
-                except Exception:
                     pass
-            else:
-                # Remove transferred frames but keep session dir with ready marker
-                for frame in sorted((session_dir / "frames").glob("frame_*.jpg")):
-                    # These were already deleted during transfer above
-                    pass
-                print(f"Transferred {transferred} frames for {session_name} (ready marker pending)")
 
-        if total_frames > 0:
-            print(f"Local frame transfer complete: {total_frames} frames moved to NAS")
-
-        # Clean up empty fallback dir
-        try:
-            if self.LOCAL_FALLBACK_DIR.exists() and not any(self.LOCAL_FALLBACK_DIR.iterdir()):
-                self.LOCAL_FALLBACK_DIR.rmdir()
-        except Exception:
-            pass
+        if total_synced > 0:
+            print(f"NAS sync complete: {total_synced} frames synced")
 
     def capture_frame(self, session_name: str, frame_number: int) -> bool:
         """
         Capture a frame for the timelapse.
 
-        Saves to NAS if available, otherwise falls back to local storage.
+        Always saves locally first (guaranteed storage), then syncs to NAS
+        as best-effort. Frames are never lost even if NAS is unavailable.
 
         Args:
             session_name: Current session name
@@ -283,26 +257,10 @@ class TimelapseManager:
         if not snapshot:
             return False
 
-        # Try NAS first
-        if self._nas_available:
-            try:
-                frames_dir = self.storage_path / session_name / "frames"
-                if not frames_dir.exists():
-                    frames_dir.mkdir(parents=True, exist_ok=True)
-                frame_path = frames_dir / f"frame_{frame_number:06d}.jpg"
-                if self._copy_with_timeout(snapshot, frame_path, timeout=30):
-                    return True
-            except OSError:
-                pass
-            # NAS write failed — switch to local fallback
-            if self._nas_available:
-                print(f"\nNAS unavailable — switching to local storage")
-                self._nas_available = False
-
-        # Local fallback — check disk space first
+        # Always save locally first (primary storage)
         if not self._check_local_disk_space():
             if not self._disk_full_warned:
-                print(f"\nSD card low on space (<{self.MIN_FREE_DISK_MB}MB free) — skipping local frame capture")
+                print(f"\nSD card low on space (<{self.MIN_FREE_DISK_MB}MB free) — skipping frame capture")
                 self._disk_full_warned = True
             return False
 
@@ -314,10 +272,26 @@ class TimelapseManager:
             local_frames_dir.mkdir(parents=True, exist_ok=True)
             frame_path = local_frames_dir / f"frame_{frame_number:06d}.jpg"
             shutil.copy2(snapshot, frame_path)
-            return True
         except Exception as e:
-            print(f"\nLocal fallback save failed: {e}")
+            print(f"\nLocal save failed: {e}")
             return False
+
+        # Best-effort NAS sync (frame is already safe locally)
+        if self._nas_available:
+            try:
+                nas_frames_dir = self.storage_path / session_name / "frames"
+                if not nas_frames_dir.exists():
+                    nas_frames_dir.mkdir(parents=True, exist_ok=True)
+                nas_frame = nas_frames_dir / f"frame_{frame_number:06d}.jpg"
+                if not self._copy_with_timeout(frame_path, nas_frame, timeout=10):
+                    if self._nas_available:
+                        self._nas_available = False
+            except OSError:
+                if self._nas_available:
+                    print(f"\nNAS sync failed — frames safe locally")
+                    self._nas_available = False
+
+        return True
 
     def run_monitor(self, check_interval: int = 30):
         """
@@ -327,8 +301,8 @@ class TimelapseManager:
             check_interval: Seconds between printer status checks
         """
         print("=== Prusa Timelapse Monitor ===")
-        print(f"Storage: {self.storage_path}")
-        print(f"Local fallback: {self.LOCAL_FALLBACK_DIR}")
+        print(f"Local storage: {self.LOCAL_FALLBACK_DIR}")
+        print(f"NAS sync target: {self.storage_path}")
         print(f"Capture interval: {self.config.capture_interval}s")
         print(f"Finishing mode: >= {self.config.finishing_threshold}% @ {self.config.finishing_interval}s")
         print(f"Post-print: {self.config.post_print_frames} frames @ {self.config.post_print_interval}s")
@@ -342,10 +316,10 @@ class TimelapseManager:
         # Check initial NAS state
         self._nas_available = self.nas.is_healthy()
         if self._nas_available:
-            print("NAS: connected")
-            self._transfer_local_frames_to_nas()
+            print("NAS: connected — frames will be synced")
+            self._sync_frames_to_nas()
         else:
-            print("NAS: unavailable — frames will be stored locally until NAS returns")
+            print("NAS: unavailable — frames safe locally, will sync when NAS returns")
         print()
 
         current_session = None
@@ -392,7 +366,7 @@ class TimelapseManager:
                         print(f"\nNAS became unavailable — switching to local storage")
                     elif self._nas_available and was_unavailable:
                         print(f"\nNAS is back online — transferring local frames...")
-                        self._transfer_local_frames_to_nas()
+                        self._sync_frames_to_nas()
 
                 # Check for manual override
                 manual_session = self._get_active_session()
@@ -446,16 +420,16 @@ class TimelapseManager:
                     if manual_session:
                         current_session = manual_session
                         current_job_id = None  # Manual recordings don't track job ID
-                        # Create session directory — NAS or local fallback
-                        try:
-                            if self._nas_available:
-                                session_dir = self.storage_path / current_session / "frames"
-                                session_dir.mkdir(parents=True, exist_ok=True)
-                            else:
-                                raise OSError("NAS unavailable")
-                        except OSError:
-                            local_dir = self.LOCAL_FALLBACK_DIR / current_session / "frames"
-                            local_dir.mkdir(parents=True, exist_ok=True)
+                        # Always create local session directory (primary storage)
+                        local_dir = self.LOCAL_FALLBACK_DIR / current_session / "frames"
+                        local_dir.mkdir(parents=True, exist_ok=True)
+                        # Also create NAS directory if available
+                        if self._nas_available:
+                            try:
+                                nas_dir = self.storage_path / current_session / "frames"
+                                nas_dir.mkdir(parents=True, exist_ok=True)
+                            except OSError:
+                                pass
                         print(f"Recording started (manual): {current_session}")
                     else:
                         job_name = status.job_name if status else None

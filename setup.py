@@ -215,23 +215,13 @@ def find_config_txt() -> Optional[Path]:
     return None
 
 
-def optimize_memory() -> bool:
-    """Optimize memory for Pi Zero 2W: reduce CMA, GPU mem, disable unused hardware/services."""
-    print_header("Memory Optimization (Pi Zero 2W)")
+def verify_pi5_config() -> bool:
+    """Verify Raspberry Pi 5 boot configuration for camera support."""
+    print_header("Raspberry Pi 5 Configuration Check")
 
-    print("The Pi Zero 2W has only 512MB RAM (416MB usable).")
-    print("Default settings waste ~250MB on unused features.")
+    print("Raspberry Pi 5 (4-8GB RAM, quad-core A76 @ 2.4 GHz).")
+    print("Verifying boot configuration for camera support...")
     print()
-    print("This step will:")
-    print("  - Reduce CMA reservation from 256MB to 64MB")
-    print("  - Reduce GPU memory from 64MB to 32MB")
-    print("  - Disable audio, Bluetooth, and framebuffers")
-    print("  - Disable ModemManager and polkit services")
-    print()
-
-    if not confirm("Apply memory optimizations?", default=True):
-        print("Skipping memory optimization.")
-        return True
 
     config_path = find_config_txt()
     if not config_path:
@@ -250,130 +240,36 @@ def optimize_memory() -> bool:
             return confirm("Continue anyway?", default=True)
         content = result.stdout
 
-    changes = []
-
-    # 1. Reduce CMA to 64MB
-    if "dtoverlay=vc4-kms-v3d,cma-" in content:
-        print("  [OK] CMA already configured")
-    elif "dtoverlay=vc4-kms-v3d" in content:
-        content = content.replace(
-            "dtoverlay=vc4-kms-v3d",
-            "dtoverlay=vc4-kms-v3d,cma-64",
-        )
-        changes.append("CMA reduced to 64MB")
-    else:
-        print("  [SKIP] vc4-kms-v3d overlay not found")
-
-    # 2. Set gpu_mem=32
-    if "gpu_mem=" in content:
-        print("  [OK] gpu_mem already configured")
-    else:
-        # Add after [all] section if it exists, otherwise append
-        if "[all]" in content:
-            content = content.replace("[all]", "[all]\ngpu_mem=32", 1)
-        else:
-            content += "\ngpu_mem=32\n"
-        changes.append("GPU memory set to 32MB")
-
-    # 3. Disable audio
-    if "dtparam=audio=off" in content:
-        print("  [OK] Audio already disabled")
-    elif "dtparam=audio=on" in content:
-        content = content.replace("dtparam=audio=on", "dtparam=audio=off")
-        changes.append("Audio disabled")
-
-    # 4. Set max_framebuffers=0
-    if "max_framebuffers=0" in content:
-        print("  [OK] Framebuffers already disabled")
-    elif "max_framebuffers=" in content:
-        # Replace any existing value
-        lines = content.split("\n")
-        for i, line in enumerate(lines):
-            if line.strip().startswith("max_framebuffers="):
-                lines[i] = "max_framebuffers=0"
-                break
-        content = "\n".join(lines)
-        changes.append("Framebuffers disabled")
-
-    # 5. Disable Bluetooth
-    if "dtoverlay=disable-bt" in content:
-        print("  [OK] Bluetooth already disabled")
-    else:
-        content += "\ndtoverlay=disable-bt\n"
-        changes.append("Bluetooth disabled")
-
-    # Write config if changed
-    if changes:
-        print()
-        for change in changes:
-            print(f"  [APPLY] {change}")
-
-        # Backup and write
-        backup_path = str(config_path) + ".bak"
-        result = subprocess.run(
-            ["sudo", "cp", str(config_path), backup_path],
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            print(f"  Backup saved to {backup_path}")
-
-        # Write via temp file + sudo mv
-        temp_path = Path("/tmp/config.txt.setup")
-        temp_path.write_text(content)
-        result = subprocess.run(
-            ["sudo", "cp", str(temp_path), str(config_path)],
-            capture_output=True,
-        )
-        temp_path.unlink(missing_ok=True)
-
-        if result.returncode != 0:
-            print("  Failed to write config.txt (needs sudo)")
-            return confirm("Continue anyway?", default=True)
-
-        print("  Config saved!")
-    else:
-        print()
-        print("  Config already optimized, no changes needed.")
-
-    # 6. Disable unnecessary services
-    print()
-    print("Disabling unnecessary services...")
-
-    for service in ["ModemManager", "polkit"]:
-        # Check if service exists
-        check = subprocess.run(
-            ["systemctl", "list-unit-files", f"{service}.service"],
-            capture_output=True, text=True,
-        )
-        if service not in check.stdout:
-            print(f"  [SKIP] {service} not installed")
+    # Check camera_auto_detect (most important)
+    has_camera = False
+    for line in content.split("\n"):
+        line = line.strip()
+        if line.startswith("#"):
             continue
+        if "camera_auto_detect" in line and "=1" in line:
+            has_camera = True
 
-        # Check if already masked
-        status = subprocess.run(
-            ["systemctl", "is-enabled", f"{service}.service"],
-            capture_output=True, text=True,
-        )
-        if "masked" in status.stdout:
-            print(f"  [OK] {service} already disabled")
-            continue
+    if has_camera:
+        print("  [OK] Camera auto-detect enabled")
+    else:
+        print("  [MISSING] camera_auto_detect=1 not found")
+        print("  This is required for the camera to work.")
+        print(f"  Add 'camera_auto_detect=1' to {config_path}")
+        if not confirm("Continue anyway?", default=False):
+            return False
 
-        subprocess.run(
-            ["sudo", "systemctl", "disable", "--now", f"{service}.service"],
-            capture_output=True,
-        )
-        subprocess.run(
-            ["sudo", "systemctl", "mask", f"{service}.service"],
-            capture_output=True,
-        )
-        print(f"  [APPLY] {service} disabled and masked")
-
+    # Check for Pi 5 specific settings
     print()
-    if changes:
-        print("NOTE: Boot config changes take effect after reboot.")
-        print("      A reboot will be needed after setup completes.")
-
+    print("Pi 5 has ample resources — no memory optimization needed.")
+    print("  RAM: 4-8 GB (vs 512 MB on Pi Zero 2W)")
+    print("  CPU: 4x Cortex-A76 @ 2.4 GHz (vs 4x Cortex-A53 @ 1.0 GHz)")
     print()
+    print("Local-first storage architecture:")
+    print("  Frames are always saved to local SD card first,")
+    print("  then synced to NAS. No footage is ever lost due")
+    print("  to NAS outages.")
+    print()
+
     return True
 
 
@@ -948,9 +844,9 @@ def main():
     """Main setup entry point."""
     print()
     print("=" * 50)
-    print("     Prusa Camera Setup")
-    print("     Raspberry Pi Camera for Prusa Connect")
-    print("     with NAS Timelapse Storage")
+    print("     Prusa Camera Setup (Raspberry Pi 5)")
+    print("     Camera for Prusa Connect")
+    print("     with Local-First + NAS Timelapse Storage")
     print("=" * 50)
     print()
 
@@ -963,8 +859,8 @@ def main():
         print("Setup cancelled.")
         sys.exit(1)
 
-    # Step 2: Memory Optimization
-    if not optimize_memory():
+    # Step 2: Pi 5 Configuration Check
+    if not verify_pi5_config():
         print("Setup cancelled.")
         sys.exit(1)
 
@@ -1010,14 +906,17 @@ def main():
     print("  1. Camera uploads snapshots to Prusa Connect every",
           f"{config.upload_interval}s")
     print("  2. When you start a print, timelapse frames are captured automatically")
-    print("  3. Frames are saved to NAS as JPEGs")
+    print("  3. Frames are ALWAYS saved locally first (zero data loss)")
+    print("  4. Frames are synced to NAS in the background")
     if config.video_enabled:
-        print("  4. After print completes, an MP4 video is created automatically")
+        print("  5. After print completes, an MP4 video is encoded locally")
+        print("  6. Encoded video is synced to NAS automatically")
     print()
-    print("Files will be saved to:")
-    print(f"  {config.nas_mount_point}/<session>/frames/  (JPEG frames)")
+    print("Files are saved to:")
+    print(f"  ~/timelapse_local/<session>/frames/  (local, always)")
+    print(f"  {config.nas_mount_point}/<session>/frames/  (NAS, synced)")
     if config.video_enabled:
-        print(f"  {config.nas_mount_point}/<session>/<session>.mp4  (video)")
+        print(f"  {config.nas_mount_point}/<session>/<session>.mp4  (video, synced)")
     print()
     print("Manual timelapse control:")
     print("  Start: echo 'my_print' > ~/.timelapse_recording")

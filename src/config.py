@@ -42,7 +42,7 @@ class Config:
             "frame_rate": "10",
             "rotation": "180",
             "crf": "18",
-            "preset": "veryfast",
+            "preset": "medium",
         },
     }
 
@@ -183,7 +183,7 @@ class Config:
     def video_preset(self) -> str:
         preset = self.get("video", "preset", "veryfast")
         valid = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
-        return preset if preset in valid else "veryfast"
+        return preset if preset in valid else "medium"
 
     def is_configured(self) -> bool:
         """Check if essential configuration is present."""

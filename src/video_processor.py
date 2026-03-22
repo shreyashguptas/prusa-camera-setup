@@ -21,6 +21,7 @@ class VideoProcessor:
     PROCESSING_MARKER = ".processing_video"
     COMPLETE_MARKER = "video_complete"
     LOG_FILE = "video_creation.log"
+    LOCAL_STORAGE_DIR = Path.home() / "timelapse_local"
 
     def __init__(self, config: Config):
         self.config = config
@@ -130,7 +131,7 @@ class VideoProcessor:
             "-crf", str(self.config.video_crf),
             "-preset", self.config.video_preset,
             "-pix_fmt", "yuv420p",
-            "-threads", "2",
+            "-threads", "4",
             "-movflags", "+faststart",
             str(local_tmp_file),
         ])
@@ -166,11 +167,11 @@ class VideoProcessor:
                     self._log(session_path, f"FFmpeg output: {output[:1000]}")
                 return False
 
-            # FFmpeg succeeded — copy finished file to NAS
+            # FFmpeg succeeded — copy finished file to output location
             local_size_mb = local_tmp_file.stat().st_size / (1024 * 1024)
-            self._log(session_path, f"Encoding complete ({local_size_mb:.1f} MB), copying to NAS...")
+            self._log(session_path, f"Encoding complete ({local_size_mb:.1f} MB), copying to output...")
             shutil.copy2(str(local_tmp_file), str(output_path))
-            self._log(session_path, f"Copied to NAS: {output_path}")
+            self._log(session_path, f"Video saved: {output_path}")
             return True
 
         except Exception as e:
@@ -184,9 +185,108 @@ class VideoProcessor:
                 except Exception:
                     pass
 
+    def _is_local_session(self, session_path: Path) -> bool:
+        """Check if session is in local storage (vs NAS)."""
+        try:
+            return self.LOCAL_STORAGE_DIR in session_path.parents or session_path.parent == self.LOCAL_STORAGE_DIR
+        except Exception:
+            return False
+
+    def _sync_session_to_nas(self, session_path: Path) -> bool:
+        """Sync a completed local session (video + log) to NAS.
+
+        Copies the video file and log to NAS, then creates the complete
+        marker on NAS. Frames are also synced if not already present.
+        Local session is cleaned up only after NAS sync is confirmed.
+        """
+        session_name = session_path.name
+        nas_session = self.storage_path / session_name
+
+        if not self.nas.is_healthy():
+            self._log(session_path, "NAS unavailable — video saved locally, will sync later")
+            return False
+
+        try:
+            nas_session.mkdir(parents=True, exist_ok=True)
+
+            # Copy video to NAS
+            local_video = session_path / f"{session_name}.mp4"
+            if local_video.exists():
+                nas_video = nas_session / local_video.name
+                self._log(session_path, f"Syncing video to NAS...")
+                shutil.copy2(str(local_video), str(nas_video))
+                self._log(session_path, f"Video synced to NAS: {nas_video}")
+
+            # Sync frames that aren't on NAS yet
+            local_frames = session_path / "frames"
+            if local_frames.exists():
+                nas_frames = nas_session / "frames"
+                nas_frames.mkdir(parents=True, exist_ok=True)
+                for frame in sorted(local_frames.glob("frame_*.jpg")):
+                    nas_frame = nas_frames / frame.name
+                    if not nas_frame.exists():
+                        shutil.copy2(str(frame), str(nas_frame))
+
+            # Copy log file
+            local_log = session_path / self.LOG_FILE
+            if local_log.exists():
+                shutil.copy2(str(local_log), str(nas_session / self.LOG_FILE))
+
+            # Mark complete on NAS
+            (nas_session / self.COMPLETE_MARKER).touch()
+
+            self._log(session_path, "Session fully synced to NAS")
+
+            # Clean up local session (everything is confirmed on NAS)
+            try:
+                shutil.rmtree(session_path)
+                print(f"Cleaned up local session: {session_name}")
+            except Exception as e:
+                print(f"Warning: Could not clean up local session: {e}")
+
+            return True
+
+        except OSError as e:
+            self._log(session_path, f"NAS sync failed: {e} — video saved locally")
+            return False
+
+    def _sync_completed_local_sessions(self):
+        """Sync any completed local sessions to NAS.
+
+        Called periodically when NAS is healthy. Handles sessions where
+        video processing succeeded but NAS sync failed previously.
+        """
+        if not self.LOCAL_STORAGE_DIR.exists():
+            return
+
+        try:
+            for session_dir in self.LOCAL_STORAGE_DIR.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                complete_marker = session_dir / self.COMPLETE_MARKER
+                if complete_marker.exists():
+                    session_name = session_dir.name
+                    # Check if already on NAS
+                    nas_session = self.storage_path / session_name
+                    nas_complete = nas_session / self.COMPLETE_MARKER
+                    try:
+                        if nas_complete.exists():
+                            # Already on NAS, clean up local
+                            shutil.rmtree(session_dir)
+                            print(f"Cleaned up already-synced local session: {session_name}")
+                            continue
+                    except OSError:
+                        pass
+
+                    print(f"Syncing completed session to NAS: {session_name}")
+                    self._sync_session_to_nas(session_dir)
+        except Exception as e:
+            print(f"Error during local session sync: {e}")
+
     def process_session(self, session_path: Path) -> bool:
         """Process a single session to create video. Returns True on success."""
         session_name = session_path.name
+        is_local = self._is_local_session(session_path)
 
         ready_marker = session_path / self.READY_MARKER
         processing_marker = session_path / self.PROCESSING_MARKER
@@ -205,7 +305,8 @@ class VideoProcessor:
             return True
 
         self._log_memory(session_path)
-        self._log(session_path, f"Starting video processing for: {session_name}")
+        source_label = "local" if is_local else "NAS"
+        self._log(session_path, f"Starting video processing for: {session_name} (source: {source_label})")
 
         try:
             processing_marker.touch()
@@ -240,61 +341,80 @@ class VideoProcessor:
                 if output_path.exists():
                     size_mb = output_path.stat().st_size / (1024 * 1024)
                     self._log(session_path, f"SUCCESS: Video created: {output_path.name} ({size_mb:.1f} MB)")
+
+                # For local sessions, sync to NAS after successful encoding
+                if is_local:
+                    self._sync_session_to_nas(session_path)
+
                 return True
             else:
                 processing_marker.unlink(missing_ok=True)
                 return False
 
         except OSError as e:
-            self._log(session_path, f"ERROR: NAS error during processing: {e}")
+            self._log(session_path, f"ERROR: Storage error during processing: {e}")
             processing_marker.unlink(missing_ok=True)
-            raise  # Propagate to monitor loop for NAS recovery
+            if not is_local:
+                raise  # Propagate NAS errors for recovery
+            return False
         except Exception as e:
             self._log(session_path, f"ERROR: Processing failed: {e}")
             processing_marker.unlink(missing_ok=True)
             return False
 
     def find_pending_sessions(self) -> List[Path]:
-        """Find all sessions with ready_for_video marker."""
-        try:
-            if not self.storage_path.exists():
-                return []
-        except OSError:
-            return []
+        """Find all sessions with ready_for_video marker.
 
+        Scans local storage first (primary), then NAS for legacy sessions.
+        Deduplicates by session name to avoid processing the same session twice.
+        """
         pending = []
-        try:
-            for session_dir in self.storage_path.iterdir():
-                if not session_dir.is_dir():
-                    continue
-                ready_marker = session_dir / self.READY_MARKER
-                complete_marker = session_dir / self.COMPLETE_MARKER
-                processing_marker = session_dir / self.PROCESSING_MARKER
+        seen_names = set()
 
-                if ready_marker.exists() and not complete_marker.exists() and not processing_marker.exists():
-                    pending.append(session_dir)
-        except OSError as e:
-            print(f"NAS unavailable while scanning sessions: {e}")
-            return []
+        # Scan local storage first (always available, no NAS dependency)
+        if self.LOCAL_STORAGE_DIR.exists():
+            try:
+                for session_dir in self.LOCAL_STORAGE_DIR.iterdir():
+                    if not session_dir.is_dir():
+                        continue
+                    ready_marker = session_dir / self.READY_MARKER
+                    complete_marker = session_dir / self.COMPLETE_MARKER
+                    processing_marker = session_dir / self.PROCESSING_MARKER
+
+                    if ready_marker.exists() and not complete_marker.exists() and not processing_marker.exists():
+                        pending.append(session_dir)
+                        seen_names.add(session_dir.name)
+            except Exception as e:
+                print(f"Error scanning local sessions: {e}")
+
+        # Also scan NAS for legacy sessions (from before local-first migration)
+        try:
+            if self.storage_path.exists():
+                for session_dir in self.storage_path.iterdir():
+                    if not session_dir.is_dir():
+                        continue
+                    if session_dir.name in seen_names:
+                        continue  # Already found locally
+                    ready_marker = session_dir / self.READY_MARKER
+                    complete_marker = session_dir / self.COMPLETE_MARKER
+                    processing_marker = session_dir / self.PROCESSING_MARKER
+
+                    if ready_marker.exists() and not complete_marker.exists() and not processing_marker.exists():
+                        pending.append(session_dir)
+        except OSError:
+            pass  # NAS unavailable — local sessions still processable
         except Exception as e:
-            print(f"Error scanning for sessions: {e}")
+            print(f"Error scanning NAS sessions: {e}")
 
         return sorted(pending, key=lambda p: p.name)
 
-    def _recover_stale_sessions(self, max_age_hours: int = 2):
-        """Recover sessions stuck in processing state."""
-        try:
-            if not self.storage_path.exists():
-                return
-        except OSError:
-            print("NAS unavailable during recovery scan — skipping")
-            return
-
+    def _recover_stale_sessions_in_dir(self, search_dir: Path, max_age_seconds: int):
+        """Recover stale sessions in a specific directory."""
         now = time.time()
-        max_age_seconds = max_age_hours * 3600
-
         try:
-            for session_dir in self.storage_path.iterdir():
+            if not search_dir.exists():
+                return
+            for session_dir in search_dir.iterdir():
                 if not session_dir.is_dir():
                     continue
 
@@ -302,7 +422,6 @@ class VideoProcessor:
                 if not processing_marker.exists():
                     continue
 
-                # Check if marker is older than max_age
                 marker_age = now - processing_marker.stat().st_mtime
                 if marker_age < max_age_seconds:
                     continue
@@ -310,7 +429,6 @@ class VideoProcessor:
                 session_name = session_dir.name
                 print(f"Recovering stale session: {session_name} (stuck for {marker_age/3600:.1f} hours)")
 
-                # Delete incomplete video if exists
                 video_file = session_dir / f"{session_name}.mp4"
                 if video_file.exists():
                     try:
@@ -319,14 +437,12 @@ class VideoProcessor:
                     except Exception as e:
                         print(f"  Warning: Could not delete video: {e}")
 
-                # Delete stale processing marker
                 try:
                     processing_marker.unlink()
                     print(f"  Deleted stale processing marker")
                 except Exception as e:
                     print(f"  Warning: Could not delete marker: {e}")
 
-                # Ensure ready_for_video exists so it will be retried
                 ready_marker = session_dir / self.READY_MARKER
                 if not ready_marker.exists():
                     try:
@@ -334,16 +450,29 @@ class VideoProcessor:
                         print(f"  Created ready marker for retry")
                     except Exception as e:
                         print(f"  Warning: Could not create ready marker: {e}")
-
         except OSError as e:
-            print(f"NAS unavailable during recovery scan: {e}")
+            print(f"Storage unavailable during recovery scan: {e}")
         except Exception as e:
             print(f"Error during recovery scan: {e}")
+
+    def _recover_stale_sessions(self, max_age_hours: int = 2):
+        """Recover sessions stuck in processing state (both local and NAS)."""
+        max_age_seconds = max_age_hours * 3600
+
+        # Recover local sessions first (always available)
+        self._recover_stale_sessions_in_dir(self.LOCAL_STORAGE_DIR, max_age_seconds)
+
+        # Recover NAS sessions if available
+        try:
+            self._recover_stale_sessions_in_dir(self.storage_path, max_age_seconds)
+        except OSError:
+            print("NAS unavailable during recovery scan — skipping NAS")
 
     def run_monitor(self, check_interval: int = 60):
         """Run the video processor monitor loop."""
         print("=== Prusa Video Processor ===")
-        print(f"Storage: {self.storage_path}")
+        print(f"Local storage: {self.LOCAL_STORAGE_DIR}")
+        print(f"NAS sync target: {self.storage_path}")
         print(f"Video settings:")
         print(f"  Enabled: {self.config.video_enabled}")
         print(f"  Frame rate: {self.config.video_frame_rate} FPS")
@@ -368,49 +497,58 @@ class VideoProcessor:
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
 
-        # Check NAS availability before starting
+        # Recover stale sessions (local always, NAS if available)
+        self._recover_stale_sessions()
+
+        # Check NAS availability
         nas_was_unavailable = False
         if self.nas.ensure_mounted():
-            self._recover_stale_sessions()
+            print("NAS: connected — videos will be synced after encoding")
+            self._sync_completed_local_sessions()
         else:
-            print("NAS unavailable at startup — will retry periodically")
+            print("NAS: unavailable — videos will be saved locally until NAS returns")
             nas_was_unavailable = True
         print()
 
+        # Track NAS sync interval (sync completed sessions every 5 minutes)
+        last_nas_sync = time.time()
+        NAS_SYNC_INTERVAL = 300
+
         while not self._should_stop:
             try:
-                # Check NAS health, attempt remount if stale
-                if not self.nas.is_healthy():
-                    if not nas_was_unavailable:
-                        print("NAS became unavailable — attempting remount...")
-                        nas_was_unavailable = True
-                    self.nas.try_remount()
-                    if not self.nas.is_healthy():
-                        # Still unavailable, wait and retry
-                        for _ in range(check_interval):
-                            if self._should_stop:
-                                break
-                            time.sleep(1)
-                        continue
+                # Check NAS health and sync periodically
+                now = time.time()
+                nas_healthy = self.nas.is_healthy()
 
-                # NAS just came back
-                if nas_was_unavailable:
-                    print("NAS is back online")
+                if not nas_healthy:
+                    if not nas_was_unavailable:
+                        print("NAS became unavailable — videos saved locally")
+                        nas_was_unavailable = True
+                    # Try remount periodically
+                    self.nas.try_remount()
+                    nas_healthy = self.nas.is_healthy()
+
+                if nas_healthy and nas_was_unavailable:
+                    print("NAS is back online — syncing completed sessions...")
                     nas_was_unavailable = False
                     self._recover_stale_sessions()
+                    self._sync_completed_local_sessions()
+                    last_nas_sync = now
 
+                # Periodic NAS sync of completed local sessions
+                if nas_healthy and now - last_nas_sync >= NAS_SYNC_INTERVAL:
+                    self._sync_completed_local_sessions()
+                    last_nas_sync = now
+
+                # Find and process pending sessions (local + NAS)
                 pending = self.find_pending_sessions()
 
                 if pending:
-                    # Check NAS health before processing
-                    if not self._check_nas_health():
-                        print("Skipping processing cycle - NAS not healthy")
-                    else:
-                        print(f"Found {len(pending)} session(s) ready for processing")
-                        for session_path in pending:
-                            if self._should_stop:
-                                break
-                            self.process_session(session_path)
+                    print(f"Found {len(pending)} session(s) ready for processing")
+                    for session_path in pending:
+                        if self._should_stop:
+                            break
+                        self.process_session(session_path)
                 else:
                     print("Waiting for sessions...", end="\r", flush=True)
 
@@ -423,7 +561,7 @@ class VideoProcessor:
                 print("\n\nStopping video processor...")
                 break
             except OSError as e:
-                print(f"\nNAS error: {e}")
+                print(f"\nStorage error: {e}")
                 nas_was_unavailable = True
                 time.sleep(check_interval)
             except Exception as e:
