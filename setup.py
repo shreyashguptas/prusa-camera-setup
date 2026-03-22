@@ -349,16 +349,27 @@ def check_prerequisites() -> bool:
         if pip_packages:
             print()
             print(f"Missing Python packages: {', '.join(pip_packages)}")
+
+            # Find a working pip command (pip3, pip, or python3 -m pip)
+            pip_cmd = None
+            for candidate in ["pip3", "pip"]:
+                if shutil.which(candidate):
+                    pip_cmd = [candidate]
+                    break
+            if pip_cmd is None:
+                # Fall back to python3 -m pip
+                pip_cmd = [sys.executable, "-m", "pip"]
+
             if confirm("Install missing Python packages automatically?", default=True):
                 for pkg in pip_packages:
                     print(f"  Installing {pkg}...")
                     result = subprocess.run(
-                        ["pip3", "install", "--break-system-packages", pkg],
+                        pip_cmd + ["install", "--break-system-packages", pkg],
                         capture_output=True,
                     )
                     if result.returncode != 0:
                         print(f"  Failed to install {pkg}. Install manually:")
-                        print(f"    pip3 install --break-system-packages {pkg}")
+                        print(f"    {' '.join(pip_cmd)} install --break-system-packages {pkg}")
                         if not confirm("Continue anyway?", default=False):
                             return False
                     else:
@@ -367,7 +378,7 @@ def check_prerequisites() -> bool:
                 print()
                 print("To install manually:")
                 for pkg in pip_packages:
-                    print(f"  pip3 install --break-system-packages {pkg}")
+                    print(f"  {' '.join(pip_cmd)} install --break-system-packages {pkg}")
                 if not confirm("Continue anyway?", default=False):
                     return False
 
