@@ -290,95 +290,109 @@ def check_camera_config() -> bool:
     return False
 
 
+def _install_pip_package(pip_name: str) -> bool:
+    """Try to install a Python package via pip as a last resort.
+
+    Attempts pip3, pip, then python3 -m pip. Uses --break-system-packages
+    since we're on a dedicated Pi with no virtual environments.
+    """
+    pip_cmd = None
+    for candidate in ["pip3", "pip"]:
+        if shutil.which(candidate):
+            pip_cmd = [candidate]
+            break
+    if pip_cmd is None:
+        pip_cmd = [sys.executable, "-m", "pip"]
+
+    # Ensure pip itself is available
+    test = subprocess.run(pip_cmd + ["--version"], capture_output=True)
+    if test.returncode != 0:
+        # pip not installed at all — install it via apt
+        print(f"  pip not found, installing python3-pip...")
+        subprocess.run(["sudo", "apt", "install", "-y", "python3-pip"], capture_output=False)
+
+    print(f"  Trying: {' '.join(pip_cmd)} install --break-system-packages {pip_name}")
+    result = subprocess.run(
+        pip_cmd + ["install", "--break-system-packages", pip_name],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        print(f"  {pip_name} installed successfully via pip!")
+        return True
+    else:
+        print(f"  Failed to install {pip_name} via pip.")
+        print(f"  You can try manually: sudo {' '.join(pip_cmd)} install --break-system-packages {pip_name}")
+        return False
+
+
 def check_prerequisites() -> bool:
     """Check and display prerequisites."""
     print_header("Prerequisites Check")
 
-    # Define checks: (name, check_function, apt_package, pip_package, install_instruction)
+    # Check for mount.cifs in multiple locations (varies by distro version)
+    has_cifs = (
+        Path("/sbin/mount.cifs").exists()
+        or Path("/usr/sbin/mount.cifs").exists()
+        or shutil.which("mount.cifs") is not None
+    )
+
+    # Define checks: (name, check_function, apt_package, apt_python_package, install_instruction)
+    # apt_python_package is for Python packages that should be installed via apt, not pip
     checks = [
         ("camera_auto_detect=1", check_camera_config(), None, None, None),
         ("rpicam-still", shutil.which("rpicam-still") is not None, "rpicam-apps", None, None),
         ("ffmpeg", shutil.which("ffmpeg") is not None, "ffmpeg", None, None),
         ("TailScale", shutil.which("tailscale") is not None, None, None, "curl -fsSL https://tailscale.com/install.sh | sh"),
-        ("cifs-utils", Path("/sbin/mount.cifs").exists(), "cifs-utils", None, None),
+        ("cifs-utils", has_cifs, "cifs-utils", None, None),
         ("smbclient", shutil.which("smbclient") is not None, "smbclient", None, None),
-        ("simple-term-menu", HAS_MENU, None, "simple-term-menu", None),
+        ("simple-term-menu", HAS_MENU, None, "python3-simple-term-menu", None),
     ]
 
     missing = []
-    for name, ok, apt_pkg, pip_pkg, custom_install in checks:
+    for name, ok, apt_pkg, apt_py_pkg, custom_install in checks:
         status = "[OK]" if ok else "[MISSING]"
         print(f"  {status} {name}")
         if not ok:
-            missing.append((name, apt_pkg, pip_pkg, custom_install))
+            missing.append((name, apt_pkg, apt_py_pkg, custom_install))
 
     print()
 
     if not missing:
         print("All prerequisites satisfied!")
     else:
-        # Collect apt packages that can be auto-installed
+        # Collect apt packages (system + Python packages all installed via apt)
         apt_packages = [pkg for name, pkg, _, _ in missing if pkg]
-        pip_packages = [pkg for name, _, pkg, _ in missing if pkg]
+        apt_python_packages = [pkg for name, _, pkg, _ in missing if pkg]
+        all_apt_packages = apt_packages + apt_python_packages
         custom_installs = [(name, cmd) for name, _, _, cmd in missing if cmd]
         config_missing = any(name == "camera_auto_detect=1" for name, _, _, _ in missing)
 
-        # Offer to auto-install apt packages
-        if apt_packages:
-            print(f"Missing apt packages: {', '.join(apt_packages)}")
-            if confirm("Install missing apt packages automatically?", default=True):
-                print(f"  Running: sudo apt install -y {' '.join(apt_packages)}")
+        # Install all packages via apt (system + Python)
+        if all_apt_packages:
+            print(f"Missing packages: {', '.join(all_apt_packages)}")
+            if confirm("Install missing packages automatically?", default=True):
+                print(f"  Running: sudo apt install -y {' '.join(all_apt_packages)}")
                 result = subprocess.run(
-                    ["sudo", "apt", "install", "-y"] + apt_packages,
+                    ["sudo", "apt", "install", "-y"] + all_apt_packages,
                     capture_output=False,
                 )
                 if result.returncode != 0:
-                    print("  Installation failed. Please install manually.")
+                    # apt failed — for Python packages, try pip as fallback
+                    print("  Some packages may have failed via apt.")
+                    if apt_python_packages:
+                        print("  Trying pip as fallback for Python packages...")
+                        for apt_py_pkg in apt_python_packages:
+                            # Convert apt name to pip name (python3-simple-term-menu -> simple-term-menu)
+                            pip_name = apt_py_pkg.replace("python3-", "")
+                            _install_pip_package(pip_name)
                     if not confirm("Continue anyway?", default=False):
                         return False
                 else:
-                    print("  Apt packages installed successfully!")
+                    print("  Packages installed successfully!")
             else:
                 print()
                 print("To install manually:")
-                print(f"  sudo apt install -y {' '.join(apt_packages)}")
-                if not confirm("Continue anyway?", default=False):
-                    return False
-
-        # Offer to auto-install pip packages
-        if pip_packages:
-            print()
-            print(f"Missing Python packages: {', '.join(pip_packages)}")
-
-            # Find a working pip command (pip3, pip, or python3 -m pip)
-            pip_cmd = None
-            for candidate in ["pip3", "pip"]:
-                if shutil.which(candidate):
-                    pip_cmd = [candidate]
-                    break
-            if pip_cmd is None:
-                # Fall back to python3 -m pip
-                pip_cmd = [sys.executable, "-m", "pip"]
-
-            if confirm("Install missing Python packages automatically?", default=True):
-                for pkg in pip_packages:
-                    print(f"  Installing {pkg}...")
-                    result = subprocess.run(
-                        pip_cmd + ["install", "--break-system-packages", pkg],
-                        capture_output=True,
-                    )
-                    if result.returncode != 0:
-                        print(f"  Failed to install {pkg}. Install manually:")
-                        print(f"    {' '.join(pip_cmd)} install --break-system-packages {pkg}")
-                        if not confirm("Continue anyway?", default=False):
-                            return False
-                    else:
-                        print(f"  {pkg} installed successfully!")
-            else:
-                print()
-                print("To install manually:")
-                for pkg in pip_packages:
-                    print(f"  {' '.join(pip_cmd)} install --break-system-packages {pkg}")
+                print(f"  sudo apt install -y {' '.join(all_apt_packages)}")
                 if not confirm("Continue anyway?", default=False):
                     return False
 
